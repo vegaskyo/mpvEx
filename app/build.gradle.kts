@@ -1,5 +1,6 @@
 import com.android.build.api.variant.FilterConfiguration
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
@@ -76,9 +77,9 @@ android {
   // Create the file with: storeFile, storePassword, keyAlias, keyPassword.
   // (File is gitignored — never commit it.)
   val keystorePropsFile = rootProject.file("keystore.properties")
-  val keystoreProps = java.util.Properties().apply {
+  val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) {
-      keystorePropsFile.inputStream().use { load(it) }
+      keystorePropsFile.inputStream().use { stream -> this.load(stream) }
     }
   }
 
