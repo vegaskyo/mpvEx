@@ -11,7 +11,9 @@ plugins {
 
 android {
   namespace = "app.marlboroadvance.mpvex"
-  compileSdk = 36
+  // 37 required by Compose 1.12.0-alpha03 (pulled in by Material3 1.5.0-alpha23);
+  // needs AGP >= 9.2.0
+  compileSdk = 37
 
   defaultConfig {
     applicationId = "app.marlboroadvance.mpvex"
@@ -70,6 +72,27 @@ android {
     }
   }
 
+  // Release signing: reads keystore.properties at the repo root if present.
+  // Create the file with: storeFile, storePassword, keyAlias, keyPassword.
+  // (File is gitignored — never commit it.)
+  val keystorePropsFile = rootProject.file("keystore.properties")
+  val keystoreProps = java.util.Properties().apply {
+    if (keystorePropsFile.exists()) {
+      keystorePropsFile.inputStream().use { load(it) }
+    }
+  }
+
+  signingConfigs {
+    if (keystorePropsFile.exists()) {
+      create("release") {
+        storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+        storePassword = keystoreProps.getProperty("storePassword")
+        keyAlias = keystoreProps.getProperty("keyAlias")
+        keyPassword = keystoreProps.getProperty("keyPassword")
+      }
+    }
+  }
+
   buildTypes {
     named("release") {
       isMinifyEnabled = true
@@ -80,6 +103,9 @@ android {
       )
       ndk {
         debugSymbolLevel = "none"
+      }
+      if (keystorePropsFile.exists()) {
+        signingConfig = signingConfigs.getByName("release")
       }
     }
 
