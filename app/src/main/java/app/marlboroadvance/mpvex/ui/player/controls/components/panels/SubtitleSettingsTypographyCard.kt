@@ -44,7 +44,9 @@ import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.R
 import app.marlboroadvance.mpvex.preferences.SubtitleJustification
 import app.marlboroadvance.mpvex.preferences.SubtitlesPreferences
+import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.preferences.preference.deleteAndGet
+import app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils
 import app.marlboroadvance.mpvex.presentation.components.ExpandableCard
 import app.marlboroadvance.mpvex.presentation.components.ExposedTextDropDownMenu
 import app.marlboroadvance.mpvex.presentation.components.SliderItem
@@ -84,7 +86,7 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
         fonts.addAll(
           fileManager
             .listFiles(fontsDir)
-            .filter { fileManager.isFile(it) && fileManager.getName(it).lowercase().matches(".*\\.[ot]tf$".toRegex()) }
+            .filter { fileManager.isFile(it) && fileManager.getName(it).lowercase().matches(SubtitleFontUtils.FONT_FILE_REGEX) }
             .mapNotNull {
               runCatching {
                 TTFFile.open(fileManager.getInputStream(it) ?: return@mapNotNull null).families.values.first()
@@ -111,13 +113,11 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
     colors = panelCardsColors(),
   ) {
     Column {
-      val isBold by MPVLib.propBoolean["sub-bold"].collectAsState()
       val isItalic by MPVLib.propBoolean["sub-italic"].collectAsState()
       val mpvJustify by MPVLib.propString["sub-justify"].collectAsState()
       val justify by remember {
         derivedStateOf { SubtitleJustification.entries.first { it.value == mpvJustify } }
       }
-      val font by MPVLib.propString["sub-font"].collectAsState()
       val fontSize by MPVLib.propInt["sub-font-size"].collectAsState()
       val mpvBorderStyle by MPVLib.propString["sub-border-style"].collectAsState()
       val borderStyle by remember {
@@ -132,19 +132,6 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
           .padding(start = MaterialTheme.spacing.extraSmall, end = MaterialTheme.spacing.medium),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        IconToggleButton(
-          checked = isBold == true,
-          onCheckedChange = {
-            preferences.bold.set(it)
-            MPVLib.setPropertyBoolean("sub-bold", it)
-          },
-        ) {
-          Icon(
-            Icons.Default.FormatBold,
-            null,
-            modifier = Modifier.size(32.dp),
-          )
-        }
         IconToggleButton(
           checked = isItalic == true,
           onCheckedChange = {
@@ -199,17 +186,36 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
           modifier = Modifier.size(32.dp),
         )
         ExposedTextDropDownMenu(
-          selectedValue = font!!.ifEmpty { "Default" },
+          selectedValue = preferences.font.collectAsState().value.ifEmpty { "Default" },
           options = fonts.toImmutableList(),
           label = stringResource(R.string.player_sheets_sub_typography_font),
           onValueChangedEvent = {
             val actualFont = if (it == "Default") "" else it
             preferences.font.set(actualFont)
-            MPVLib.setPropertyString("sub-font", actualFont)
-            MPVLib.setPropertyString("secondary-sub-font", actualFont)
+            // Re-apply with the current weight so e.g. "Inter 18pt" + 600
+            // resolves to the real SemiBold face
+            SubtitleFontUtils.applyFontWithWeight(context, actualFont, preferences.fontWeight.get())
           },
           leadingIcon = fontsLoadingIndicator,
         )
+      }
+      // Font weight (boldness) slider — replaces the old on/off Bold button.
+      // 100 (Thin) .. 900 (Black); uses real weight faces when the selected
+      // family provides them, synthetic bold otherwise (>= 600).
+      val fontWeight by preferences.fontWeight.collectAsState()
+      SliderItem(
+        label = stringResource(R.string.player_sheets_sub_typography_font_weight),
+        max = 9,
+        min = 1,
+        value = (fontWeight / 100).coerceIn(1, 9),
+        valueText = SubtitleFontUtils.weightLabel(fontWeight),
+        onChange = { step ->
+          val weight = step * 100
+          preferences.fontWeight.set(weight)
+          SubtitleFontUtils.applyFontWithWeight(context, preferences.font.get(), weight)
+        },
+      ) {
+        Icon(Icons.Default.FormatBold, null)
       }
       SliderItem(
         label = stringResource(R.string.player_sheets_sub_typography_font_size),
@@ -272,6 +278,7 @@ fun resetTypography(preferences: SubtitlesPreferences) {
   MPVLib.setPropertyBoolean("sub-italic", preferences.italic.deleteAndGet())
   MPVLib.setPropertyBoolean("sub-ass-justify", false)
   MPVLib.setPropertyString("sub-justify", preferences.justification.deleteAndGet().value)
+  preferences.fontWeight.delete()
   MPVLib.setPropertyString("sub-font", preferences.font.deleteAndGet())
   MPVLib.setPropertyString("secondary-sub-font", preferences.font.get())
   MPVLib.setPropertyInt("sub-font-size", preferences.fontSize.deleteAndGet())

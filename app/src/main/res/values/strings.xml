@@ -291,6 +291,11 @@
   <string name="player_sheets_sub_position">Position</string>
   <string name="player_sheets_sub_typography_card_title">Typography</string>
   <string name="player_sheets_sub_typography_font">Font</string>
+  <string name="player_sheets_sub_typography_font_weight">Font weight</string>
+  <string name="pref_subtitles_import_font">Import font files</string>
+  <string name="pref_subtitles_import_font_summary">Add .ttf, .otf or .ttc fonts (WOFF/WOFF2 not supported)</string>
+  <string name="toast_fonts_imported">Imported %d font(s)</string>
+  <string name="toast_font_import_invalid">Unsupported file type. Use .ttf, .otf or .ttc</string>
   <string name="player_sheets_sub_typography_font_size">Font size</string>
   <string name="player_sheets_sub_typography_border_size">Border size</string>
   <string name="player_sheets_sub_colors_card_title">Colors</string>

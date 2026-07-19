@@ -251,6 +251,10 @@ class MPVView(
     MPVLib.setOptionString("sub-file-paths", "")
     MPVLib.setOptionString("subs-fallback", "no")
 
+    // Try harder to show the subtitle line at the current position after
+    // seeks/track switches instead of waiting for the next cue (mkv preroll).
+    MPVLib.setOptionString("demuxer-mkv-subtitle-preroll", "yes")
+
     val fontsDirPath = "${context.filesDir.path}/fonts/"
     MPVLib.setOptionString("sub-fonts-dir", fontsDirPath)
     
@@ -262,10 +266,17 @@ class MPVView(
     MPVLib.setOptionString("secondary-sub-delay", subDelay)
     MPVLib.setOptionString("secondary-sub-speed", subSpeed)
 
+    // Resolve the base family + weight slider value against installed fonts
+    // (e.g. "Inter 18pt" + 600 -> "Inter 18pt SemiBold"). The resolved bold
+    // flag is applied together with the other typography options below.
     val preferredFont = subtitlesPreferences.font.get()
-    if (preferredFont.isNotBlank()) {
-      MPVLib.setOptionString("sub-font", preferredFont)
-      MPVLib.setOptionString("secondary-sub-font", preferredFont)
+    val preferredWeight = subtitlesPreferences.fontWeight.get()
+    val resolvedFont =
+      app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils
+        .resolveFontForWeight(context, preferredFont, preferredWeight)
+    if (resolvedFont.family.isNotBlank()) {
+      MPVLib.setOptionString("sub-font", resolvedFont.family)
+      MPVLib.setOptionString("secondary-sub-font", resolvedFont.family)
     }
     // If blank, MPV uses its default font
 
@@ -280,7 +291,9 @@ class MPVView(
 
     // Typography and styling for both primary and secondary
     val fontSize = subtitlesPreferences.fontSize.get().toString()
-    val bold = if (subtitlesPreferences.bold.get()) "yes" else "no"
+    // Bold is now driven by the font-weight slider (>= 600 or an explicit Bold
+    // face), falling back to the legacy bold preference.
+    val bold = if (resolvedFont.bold || subtitlesPreferences.bold.get()) "yes" else "no"
     val italic = if (subtitlesPreferences.italic.get()) "yes" else "no"
     val justify = subtitlesPreferences.justification.get().value
     val textColor = subtitlesPreferences.textColor.get().toColorHexString()

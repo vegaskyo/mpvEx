@@ -54,6 +54,7 @@ import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
 import app.marlboroadvance.mpvex.utils.media.CustomFontEntry
+import app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils
 import app.marlboroadvance.mpvex.utils.media.copyFontsFromDirectory
 import app.marlboroadvance.mpvex.utils.media.loadCustomFontEntries
 import com.github.k1rakishou.fsaf.FileManager
@@ -128,9 +129,54 @@ object SubtitlesPreferencesScreen : Screen {
             kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
               isLoadingFonts = true
               copyFontsFromDirectory(context, fileManager, uri.toString())
+              SubtitleFontUtils.invalidateFamilyCache()
               withContext(Dispatchers.Main) {
                 fontLoadTrigger++
                 isLoadingFonts = false
+              }
+            }
+          }
+
+        // Picker for importing individual font files (.ttf/.otf/.ttc) which are
+        // copied into the app's internal fonts directory and persist there.
+        val fontFilePicker =
+          rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenMultipleDocuments(),
+          ) { uris ->
+            if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+              isLoadingFonts = true
+              var imported = 0
+              var rejected = 0
+              uris.forEach { uri ->
+                val name =
+                  DocumentFile.fromSingleUri(context, uri)?.name
+                    ?: uri.lastPathSegment?.substringAfterLast('/')
+                    ?: return@forEach
+                val ext = name.substringAfterLast('.', "").lowercase()
+                if (ext !in SubtitleFontUtils.SUPPORTED_FONT_EXTENSIONS) {
+                  rejected++
+                  return@forEach
+                }
+                val family =
+                  SubtitleFontUtils.importFontFile(context, name) {
+                    context.contentResolver.openInputStream(uri)
+                  }
+                if (family != null) imported++ else rejected++
+              }
+              withContext(Dispatchers.Main) {
+                fontLoadTrigger++
+                isLoadingFonts = false
+                if (imported > 0) {
+                  android.widget.Toast
+                    .makeText(context, context.getString(R.string.toast_fonts_imported, imported), android.widget.Toast.LENGTH_SHORT)
+                    .show()
+                }
+                if (rejected > 0) {
+                  android.widget.Toast
+                    .makeText(context, R.string.toast_font_import_invalid, android.widget.Toast.LENGTH_SHORT)
+                    .show()
+                }
               }
             }
           }
@@ -322,6 +368,7 @@ object SubtitlesPreferencesScreen : Screen {
                             kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
                               isLoadingFonts = true
                               copyFontsFromDirectory(context, fileManager, fontsFolder)
+                              SubtitleFontUtils.invalidateFamilyCache()
                               withContext(Dispatchers.Main) {
                                 fontLoadTrigger++
                                 isLoadingFonts = false
@@ -354,6 +401,32 @@ object SubtitlesPreferencesScreen : Screen {
                   }
                 }
               }
+
+              PreferenceDivider()
+
+              // Import individual font files from anywhere on the device.
+              // Supported formats: TTF, OTF, TTC (libass). WOFF/WOFF2 are not supported.
+              Preference(
+                title = { Text(stringResource(R.string.pref_subtitles_import_font)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.pref_subtitles_import_font_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+                onClick = {
+                  fontFilePicker.launch(
+                    arrayOf(
+                      "font/ttf",
+                      "font/otf",
+                      "font/collection",
+                      "application/x-font-ttf",
+                      "application/x-font-opentype",
+                      "application/octet-stream",
+                    ),
+                  )
+                },
+              )
             }
           }
 

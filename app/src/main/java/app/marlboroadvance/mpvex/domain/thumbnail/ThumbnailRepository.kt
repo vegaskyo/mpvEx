@@ -33,7 +33,10 @@ class ThumbnailRepository(
     ) 
   }
   private val diskCacheDimension = 1024
-  private val diskJpegQuality = 100
+
+  // PERF FIX: was 100 — JPEG q100 is ~2-3x larger on disk and much slower to
+  // encode for no visible gain on grid thumbnails.
+  private val diskJpegQuality = 90
   private val memoryCache: LruCache<String, Bitmap>
   private val diskDir: File = File(context.filesDir, "thumbnails").apply { mkdirs() }
   private val ongoingOperations = ConcurrentHashMap<String, Deferred<Bitmap?>>()
@@ -91,7 +94,7 @@ class ThumbnailRepository(
       val deferred =
         async {
           try {
-            loadFromDisk(video)?.let { thumbnail ->
+            loadFromDisk(video, widthPx, heightPx)?.let { thumbnail ->
               memoryCache.put(key, thumbnail)
               _thumbnailReadyKeys.tryEmit(key)
               return@async thumbnail
@@ -150,7 +153,7 @@ class ThumbnailRepository(
       
       val key = thumbnailKey(video, widthPx, heightPx)
       synchronized(memoryCache) { memoryCache.get(key) }?.let { return@withContext it }
-      loadFromDisk(video)?.let { thumbnail ->
+      loadFromDisk(video, widthPx, heightPx)?.let { thumbnail ->
         synchronized(memoryCache) { memoryCache.put(key, thumbnail) }
         return@withContext thumbnail
       }
@@ -269,16 +272,39 @@ class ThumbnailRepository(
     }
   }
 
-  private fun loadFromDisk(video: Video): Bitmap? {
+  private fun loadFromDisk(
+    video: Video,
+    reqWidthPx: Int = 0,
+    reqHeightPx: Int = 0,
+  ): Bitmap? {
     val diskFile = File(diskDir, keyToFileName(diskKey(video)))
     if (!diskFile.exists()) return null
     return runCatching {
-      val options =
-        BitmapFactory.Options().apply {
-          inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
+      // PERF FIX: subsample the decode to the requested cell size instead of
+      // always decoding the full 1024px cached image into ARGB_8888.
+      val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+      if (reqWidthPx > 0 && reqHeightPx > 0) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(diskFile.absolutePath, bounds)
+        options.inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, reqWidthPx, reqHeightPx)
+      }
       BitmapFactory.decodeFile(diskFile.absolutePath, options)
     }.getOrNull()
+  }
+
+  /** Largest power-of-2 subsample that keeps both dimensions >= requested size. */
+  private fun calculateInSampleSize(
+    srcWidth: Int,
+    srcHeight: Int,
+    reqWidth: Int,
+    reqHeight: Int,
+  ): Int {
+    var inSampleSize = 1
+    if (srcWidth <= 0 || srcHeight <= 0) return inSampleSize
+    while (srcWidth / (inSampleSize * 2) >= reqWidth && srcHeight / (inSampleSize * 2) >= reqHeight) {
+      inSampleSize *= 2
+    }
+    return inSampleSize
   }
 
   private fun writeToDisk(video: Video, bitmap: Bitmap) {

@@ -41,6 +41,12 @@ class App : Application() {
 
     FastThumbnails.initialize(this)
 
+    // Extract bundled subtitle fonts (Inter, Momo Trust Display) to filesDir/fonts
+    // so mpv's sub-fonts-dir picks them up (non-blocking)
+    applicationScope.launch(Dispatchers.IO) {
+      app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils.extractBundledFonts(this@App)
+    }
+
     // Perform cache maintenance on app startup (non-blocking)
     applicationScope.launch {
       runCatching {

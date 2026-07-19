@@ -108,7 +108,14 @@ class NetworkStreamingProvider : ContentProvider() {
       val readFd = pipe[0]
       val writeFd = pipe[1]
 
-      // Stream the file in a background thread
+      // Stream the file in a background thread.
+      // NOTE (perf review): this pipe-based path performs a sequential full-file
+      // copy and cannot seek. It is NOT used for playback — NetworkBrowserViewModel
+      // routes all playback (SMB/FTP/WebDAV) through NetworkStreamingProxy, which
+      // supports HTTP Range requests for seeking. This provider only remains as a
+      // fallback for external consumers of the content:// URI.
+      // The copy loop terminates as soon as the reader closes the pipe
+      // (output.write throws IOException -> closeWithError below).
       Thread {
         try {
           // Ensure connected
@@ -123,7 +130,8 @@ class NetworkStreamingProvider : ContentProvider() {
             client.getFileStream(filePath).onSuccess { inputStream ->
               ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { output ->
                 inputStream.use { input ->
-                  val buffer = ByteArray(8192)
+                  // 64KB buffer: fewer syscalls/network round-trips than 8KB
+                  val buffer = ByteArray(64 * 1024)
                   var bytesRead: Int
 
                   while (input.read(buffer).also { bytesRead = it } != -1) {
@@ -142,6 +150,9 @@ class NetworkStreamingProvider : ContentProvider() {
             // Ignore
           }
         }
+      }.apply {
+        name = "NetworkStreamCopy"
+        isDaemon = true
       }.start()
 
 

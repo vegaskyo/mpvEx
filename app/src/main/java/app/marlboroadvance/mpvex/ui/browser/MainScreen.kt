@@ -36,7 +36,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.presentation.Screen
@@ -44,35 +43,31 @@ import app.marlboroadvance.mpvex.ui.browser.folderlist.FolderListScreen
 import app.marlboroadvance.mpvex.ui.browser.networkstreaming.NetworkStreamingScreen
 import app.marlboroadvance.mpvex.ui.browser.playlist.PlaylistScreen
 import app.marlboroadvance.mpvex.ui.browser.recentlyplayed.RecentlyPlayedScreen
-import app.marlboroadvance.mpvex.ui.browser.selection.SelectionManager
-import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 
 @Serializable
 object MainScreen : Screen {
   // Use a companion object to store state more persistently
   private var persistentSelectedTab: Int = 0
-  
-  // Shared state that can be updated by FileSystemBrowserScreen
-  @Volatile
-  private var isInSelectionModeShared: Boolean = false  // Controls FAB visibility
-  
-  @Volatile
-  private var shouldHideNavigationBar: Boolean = false  // Controls navigation bar visibility
-  
+
+  // Shared state that can be updated by FileSystemBrowserScreen.
+  // Backed by Compose snapshot state so composables observing these values
+  // recompose automatically — no polling required.
+  private var isInSelectionModeShared by mutableStateOf(false) // Controls FAB visibility
+
+  private var shouldHideNavigationBar by mutableStateOf(false) // Controls navigation bar visibility
+
   @Volatile
   private var isBrowserBottomBarVisible: Boolean = false  // Tracks browser bottom bar visibility
-  
-  @Volatile
-  private var sharedVideoSelectionManager: Any? = null
-  
+
+  private var sharedVideoSelectionManager by mutableStateOf<Any?>(null)
+
   // Check if the selection contains only videos and update navigation bar visibility accordingly
   @Volatile
   private var onlyVideosSelected: Boolean = false
-  
+
   // Track when permission denied screen is showing to hide FAB
-  @Volatile
-  private var isPermissionDenied: Boolean = false
+  private var isPermissionDenied by mutableStateOf(false)
   
   /**
    * Update selection state and navigation bar visibility
@@ -119,43 +114,15 @@ object MainScreen : Screen {
       mutableIntStateOf(persistentSelectedTab)
     }
 
-    val context = LocalContext.current
     val density = LocalDensity.current
 
-    // Shared state (across the app)
-    val isInSelectionMode = remember { mutableStateOf(isInSelectionModeShared) }
-    val hideNavigationBar = remember { mutableStateOf(shouldHideNavigationBar) }
-    val videoSelectionManager = remember { mutableStateOf<SelectionManager<*, *>?>(sharedVideoSelectionManager as? SelectionManager<*, *>) }
-    
-    // Check for state changes to ensure UI updates
-    LaunchedEffect(Unit) {
-      while (true) {
-        // Update FAB visibility state
-        if (isInSelectionMode.value != isInSelectionModeShared) {
-          isInSelectionMode.value = isInSelectionModeShared
-          android.util.Log.d("MainScreen", "Selection mode changed to: $isInSelectionModeShared")
-        }
-        
-        // Update navigation bar visibility state - now considers if only videos are selected
-        if (hideNavigationBar.value != shouldHideNavigationBar) {
-          hideNavigationBar.value = shouldHideNavigationBar
-          android.util.Log.d("MainScreen", "Navigation bar visibility changed to: ${!shouldHideNavigationBar}, onlyVideosSelected: $onlyVideosSelected")
-        }
-        
-        // Update selection manager
-        val currentManager = sharedVideoSelectionManager as? SelectionManager<*, *>
-        if (videoSelectionManager.value != currentManager) {
-          videoSelectionManager.value = currentManager
-        }
-        
-        // Minimal delay for polling
-        delay(16) // Roughly matches a frame at 60fps for responsive updates
-      }
-    }
-    
+    // Shared state (across the app) is snapshot-backed (see companion vars above),
+    // so reading it here subscribes this composable to changes automatically.
+    // The previous 16ms polling loop has been removed.
+    val hideNavigationBar = shouldHideNavigationBar
+
     // Update persistent state whenever tab changes
     LaunchedEffect(selectedTab) {
-      android.util.Log.d("MainScreen", "selectedTab changed to: $selectedTab (was ${persistentSelectedTab})")
       persistentSelectedTab = selectedTab
     }
 
@@ -165,7 +132,7 @@ object MainScreen : Screen {
       bottomBar = {
         // Animated bottom navigation bar with slide animations
         AnimatedVisibility(
-          visible = !hideNavigationBar.value,
+          visible = !hideNavigationBar,
           enter = slideInVertically(
             animationSpec = tween(durationMillis = 300),
             initialOffsetY = { fullHeight -> fullHeight }

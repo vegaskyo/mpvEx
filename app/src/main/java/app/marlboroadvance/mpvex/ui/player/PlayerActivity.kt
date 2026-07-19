@@ -225,6 +225,14 @@ class PlayerActivity :
   private var noisyReceiverRegistered = false
   private var mpvInitialized = false // Track MPV initialization state
   private var savePlaybackStateJob: kotlinx.coroutines.Job? = null // Track ongoing save job
+
+  /**
+   * Process-level scope for playback-state DB writes so they survive activity
+   * destruction. Jobs launched here never touch MPVLib (values are snapshotted
+   * synchronously before launch), so no join is needed in onDestroy.
+   */
+  private val playbackStateSaveScope =
+    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
   private var wasPlayingBeforePause = false // Track if video was playing before pause
 
   // ==================== Background Playback ====================
@@ -574,20 +582,12 @@ class PlayerActivity :
         mediaPlaybackService = null
       }
 
-      // Wait for any pending save operation to complete before destroying MPV
-      // This prevents the race condition where the save coroutine tries to access
-      // MPV properties after MPVLib.destroy() has been called
-      savePlaybackStateJob?.let { job ->
-        Log.d(TAG, "Waiting for save playback state job to complete...")
-        runCatching {
-          // Use runBlocking to ensure we wait for the job to finish
-          // This is safe here as onDestroy is already on the main thread
-          kotlinx.coroutines.runBlocking {
-            job.join()
-          }
-        }
-        Log.d(TAG, "Save playback state job completed")
-      }
+      // NOTE: No need to wait for savePlaybackStateJob anymore.
+      // saveVideoPlaybackState() snapshots all MPV properties synchronously before
+      // launching its coroutine (which only touches the database and runs on a
+      // process-level scope), so it can safely complete after MPVLib.destroy().
+      // The previous runBlocking { job.join() } here blocked the main thread and
+      // was an ANR risk.
 
       cleanupMPV()
       cleanupAudio()
@@ -1923,11 +1923,18 @@ class PlayerActivity :
    * This ensures subtitle customizations (font, colors, position, etc.) persist across videos.
    */
   private fun applySubtitlePreferences() {
-    // Typography settings
-    MPVLib.setPropertyString("sub-font", subtitlesPreferences.font.get())
-    MPVLib.setPropertyString("secondary-sub-font", subtitlesPreferences.font.get())
+    // Typography settings — resolve base family + weight slider value
+    // (e.g. "Inter 18pt" + 600 -> "Inter 18pt SemiBold")
+    val resolvedFont =
+      app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils.resolveFontForWeight(
+        this,
+        subtitlesPreferences.font.get(),
+        subtitlesPreferences.fontWeight.get(),
+      )
+    MPVLib.setPropertyString("sub-font", resolvedFont.family)
+    MPVLib.setPropertyString("secondary-sub-font", resolvedFont.family)
     MPVLib.setPropertyInt("sub-font-size", subtitlesPreferences.fontSize.get())
-    MPVLib.setPropertyBoolean("sub-bold", subtitlesPreferences.bold.get())
+    MPVLib.setPropertyBoolean("sub-bold", resolvedFont.bold || subtitlesPreferences.bold.get())
     MPVLib.setPropertyBoolean("sub-italic", subtitlesPreferences.italic.get())
     MPVLib.setPropertyString("sub-justify", subtitlesPreferences.justification.get().value)
     MPVLib.setPropertyString("sub-border-style", subtitlesPreferences.borderStyle.get().value)
@@ -1974,45 +1981,63 @@ class PlayerActivity :
     // Cancel any previous pending save operation
     savePlaybackStateJob?.cancel()
 
-    // Launch new save job and track it
-    savePlaybackStateJob = lifecycleScope.launch(Dispatchers.IO) {
-      runCatching {
-        val oldState = playbackStateRepository.getVideoDataByTitle(mediaIdentifier)
-        Log.d(TAG, "Saving playback state for: $mediaTitle (identifier: $mediaIdentifier)")
+    // PERF FIX: Snapshot every MPV-backed value synchronously on the calling thread.
+    // These are cheap JNI reads; capturing them here means the async DB write below
+    // never touches MPVLib, so onDestroy() no longer needs to block (runBlocking)
+    // waiting for this job before calling MPVLib.destroy().
+    val identifier = mediaIdentifier
+    val playbackSpeed = MPVLib.getPropertyDouble("speed") ?: DEFAULT_PLAYBACK_SPEED
+    val videoZoom = MPVLib.getPropertyDouble("video-zoom")?.toFloat() ?: 0f
+    val sid = player.sid
+    val secondarySid = player.secondarySid
+    val subDelay = ((MPVLib.getPropertyDouble("sub-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt()
+    val subSpeed = MPVLib.getPropertyDouble("sub-speed") ?: DEFAULT_SUB_SPEED
+    val aid = player.aid
+    val audioDelay = ((MPVLib.getPropertyDouble("audio-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt()
+    val currentPos = viewModel.pos ?: 0
+    val duration = viewModel.duration ?: 0
+    val externalSubtitles = viewModel.externalSubtitles.joinToString("|")
+    val savePositionOnQuit = playerPreferences.savePositionOnQuit.get()
+    val watchedThreshold = browserPreferences.watchedThreshold.get()
 
-        val lastPosition = calculateSavePosition(oldState)
-        val duration = viewModel.duration ?: 0
+    // Launch on a process-level scope so the DB write survives activity destruction.
+    savePlaybackStateJob = playbackStateSaveScope.launch {
+      runCatching {
+        val oldState = playbackStateRepository.getVideoDataByTitle(identifier)
+        Log.d(TAG, "Saving playback state for: $mediaTitle (identifier: $identifier)")
+
+        val lastPosition =
+          if (!savePositionOnQuit) {
+            oldState?.lastPosition ?: 0
+          } else {
+            if (currentPos < duration - 1) currentPos else 0
+          }
         val timeRemaining = if (duration > lastPosition) duration - lastPosition else 0
 
         playbackStateRepository.upsert(
           PlaybackStateEntity(
-            mediaTitle = mediaIdentifier,
+            mediaTitle = identifier,
             lastPosition = lastPosition,
-            playbackSpeed = MPVLib.getPropertyDouble("speed") ?: DEFAULT_PLAYBACK_SPEED,
-            videoZoom = MPVLib.getPropertyDouble("video-zoom")?.toFloat() ?: 0f,
-            sid = player.sid,
-            secondarySid = player.secondarySid,
-            subDelay = ((MPVLib.getPropertyDouble("sub-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS).toInt(),
-            subSpeed = MPVLib.getPropertyDouble("sub-speed") ?: DEFAULT_SUB_SPEED,
-            aid = player.aid,
-            audioDelay =
-              (
-                (MPVLib.getPropertyDouble("audio-delay") ?: 0.0) * MILLISECONDS_TO_SECONDS
-                ).toInt(),
+            playbackSpeed = playbackSpeed,
+            videoZoom = videoZoom,
+            sid = sid,
+            secondarySid = secondarySid,
+            subDelay = subDelay,
+            subSpeed = subSpeed,
+            aid = aid,
+            audioDelay = audioDelay,
             timeRemaining = timeRemaining,
-            externalSubtitles = viewModel.externalSubtitles.joinToString("|"),
+            externalSubtitles = externalSubtitles,
             hasBeenWatched = run {
-              val watchedThreshold = browserPreferences.watchedThreshold.get()
               val durationSeconds = duration.toFloat()
-              val currentPos = viewModel.pos ?: 0
-              
+
               // Check if we are at the end (effectively watched)
               // Using a small buffer (1s) to account for float inaccuracies or near-end stops
               val isFinished = (durationSeconds > 0) && (currentPos >= durationSeconds - 1)
 
               val progress = if (durationSeconds > 0) currentPos.toFloat() / durationSeconds else 0f
               val isCurrentlyWatched = progress >= (watchedThreshold / 100f)
-              
+
               // Also check lastPosition in case we are saving partway through (though lastPosition might be 0 if finished)
               val oldProgress = if (durationSeconds > 0) lastPosition.toFloat() / durationSeconds else 0f
               val wasWatchedThisSession = oldProgress >= (watchedThreshold / 100f)
@@ -2025,25 +2050,6 @@ class PlayerActivity :
         Log.e(TAG, "Error saving playback state", e)
       }
     }
-  }
-
-  /**
-   * Calculates the position to save based on user preferences.
-   *
-   * If "savePositionOnQuit" is not enabled, returns the previous saved position or 0.
-   * If enabled, saves the current playback position unless at end of video.
-   *
-   * @param oldState Previous playback state if it exists
-   * @return Position in seconds to save
-   */
-  private fun calculateSavePosition(oldState: PlaybackStateEntity?): Int {
-    if (!playerPreferences.savePositionOnQuit.get()) {
-      return oldState?.lastPosition ?: 0
-    }
-
-    val pos = viewModel.pos ?: 0
-    val duration = viewModel.duration ?: 0
-    return if (pos < duration - 1) pos else 0
   }
 
   /**

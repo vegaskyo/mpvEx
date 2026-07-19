@@ -11,7 +11,7 @@ import android.util.Log
 import app.marlboroadvance.mpvex.domain.media.model.Video
 import app.marlboroadvance.mpvex.utils.media.MediaInfoOps
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -24,6 +24,9 @@ import kotlin.math.pow
  */
 object VideoScanUtils {
     private const val TAG = "VideoScanUtils"
+
+    /** Max number of files whose metadata is extracted concurrently during a scan. */
+    private const val METADATA_SCAN_CONCURRENCY = 4
     
     /**
      * Video metadata extracted from files
@@ -157,70 +160,85 @@ object VideoScanUtils {
     /**
      * Scan videos from filesystem (fallback)
      */
-    private fun scanVideosFromFileSystem(
+    private suspend fun scanVideosFromFileSystem(
         context: Context,
         folder: File,
         videosMap: MutableMap<String, Video>
-    ) {
+    ): Unit = kotlinx.coroutines.coroutineScope {
         try {
-            val files = folder.listFiles() ?: return
-            
-            for (file in files) {
-                try {
-                    if (!file.isFile) continue
-                    
-                    val extension = file.extension.lowercase(Locale.getDefault())
-                    if (!FileTypeUtils.VIDEO_EXTENSIONS.contains(extension)) continue
-                    
-                    val path = file.absolutePath
-                    if (videosMap.containsKey(path)) continue
-                    
-                    val uri = Uri.fromFile(file)
-                    val displayName = file.name
-                    val title = file.nameWithoutExtension
-                    val size = file.length()
-                    val dateModified = file.lastModified() / 1000
-                    
-                    // Extract metadata
-                    val metadata = extractVideoMetadata(context, file)
-                    
-                    videosMap[path] = Video(
-                        id = path.hashCode().toLong(),
-                        title = title,
-                        displayName = displayName,
-                        path = path,
-                        uri = uri,
-                        duration = metadata.duration,
-                        durationFormatted = formatDuration(metadata.duration),
-                        size = size,
-                        sizeFormatted = formatFileSize(size),
-                        dateModified = dateModified,
-                        dateAdded = dateModified,
-                        mimeType = metadata.mimeType,
-                        bucketId = folder.absolutePath,
-                        bucketDisplayName = folder.name,
-                        width = metadata.width,
-                        height = metadata.height,
-                        fps = 0f,
-                        resolution = formatResolution(metadata.width, metadata.height),
-                        hasEmbeddedSubtitles = false,
-                        subtitleCodec = ""
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error processing file: ${file.absolutePath}", e)
-                    continue
-                }
+            val files = folder.listFiles() ?: return@coroutineScope
+
+            // PERF FIX: metadata extraction (MediaInfo parse) was previously done
+            // sequentially per file, making large-folder scans very slow.
+            // Process files in parallel with bounded concurrency.
+            val semaphore = kotlinx.coroutines.sync.Semaphore(METADATA_SCAN_CONCURRENCY)
+            val candidates = files.filter { file ->
+                file.isFile &&
+                    FileTypeUtils.VIDEO_EXTENSIONS.contains(file.extension.lowercase(Locale.getDefault())) &&
+                    !videosMap.containsKey(file.absolutePath)
             }
-            
+
+            val scanned = candidates.map { file ->
+                kotlinx.coroutines.async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        runCatching { scanSingleFile(context, folder, file) }
+                            .onFailure { e -> Log.w(TAG, "Error processing file: ${file.absolutePath}", e) }
+                            .getOrNull()
+                    }
+                }
+            }.mapNotNull { it.await() }
+
+            scanned.forEach { video -> videosMap[video.path] = video }
         } catch (e: Exception) {
             Log.e(TAG, "Filesystem video scan error", e)
         }
     }
-    
+
+    private suspend fun scanSingleFile(
+        context: Context,
+        folder: File,
+        file: File,
+    ): Video {
+        val path = file.absolutePath
+        val uri = Uri.fromFile(file)
+        val displayName = file.name
+        val title = file.nameWithoutExtension
+        val size = file.length()
+        val dateModified = file.lastModified() / 1000
+
+        // Extract metadata
+        val metadata = extractVideoMetadata(context, file)
+
+        return Video(
+            id = path.hashCode().toLong(),
+            title = title,
+            displayName = displayName,
+            path = path,
+            uri = uri,
+            duration = metadata.duration,
+            durationFormatted = formatDuration(metadata.duration),
+            size = size,
+            sizeFormatted = formatFileSize(size),
+            dateModified = dateModified,
+            dateAdded = dateModified,
+            mimeType = metadata.mimeType,
+            bucketId = folder.absolutePath,
+            bucketDisplayName = folder.name,
+            width = metadata.width,
+            height = metadata.height,
+            fps = 0f,
+            resolution = formatResolution(metadata.width, metadata.height),
+            hasEmbeddedSubtitles = false,
+            subtitleCodec = ""
+        )
+    }
+
     /**
-     * Extracts video metadata using MediaInfo library
+     * Extracts video metadata using MediaInfo library.
+     * PERF FIX: now a suspend function — previously wrapped the suspend call in
+     * runBlocking, blocking the calling thread.
      */
-    fun extractVideoMetadata(
+    suspend fun extractVideoMetadata(
         context: Context,
         file: File,
     ): VideoMetadata {
@@ -228,13 +246,11 @@ object VideoScanUtils {
         var mimeType = "video/*"
         var width = 0
         var height = 0
-        
+
         try {
             val uri = Uri.fromFile(file)
-            val result = runBlocking {
-                MediaInfoOps.extractBasicMetadata(context, uri, file.name)
-            }
-            
+            val result = MediaInfoOps.extractBasicMetadata(context, uri, file.name)
+
             result.onSuccess { metadata ->
                 duration = metadata.durationMs
                 width = metadata.width

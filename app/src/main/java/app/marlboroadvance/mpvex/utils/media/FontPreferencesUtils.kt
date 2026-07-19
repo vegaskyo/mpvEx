@@ -31,7 +31,7 @@ fun copyFontsFromDirectory(
       fileManager.listFiles(sourceDir).forEach { file ->
         if (fileManager.isFile(file)) {
           val fileName = fileManager.getName(file)
-          if (fileName.lowercase().matches(".*\\.[ot]tf$".toRegex())) {
+          if (fileName.lowercase().matches(SubtitleFontUtils.FONT_FILE_REGEX)) {
             val inputStream = fileManager.getInputStream(file) ?: return@forEach
             val outputFile = File(destinationPath, fileName)
             outputFile.outputStream().use { outputStream ->
@@ -66,7 +66,7 @@ suspend fun loadCustomFontEntries(context: Context): List<CustomFontEntry> =
     val fontFiles =
       fontsDir
         .listFiles()
-        ?.filter { it.isFile && it.name.lowercase(Locale.ROOT).matches(".*\\.[ot]tf$".toRegex()) }
+        ?.filter { it.isFile && it.name.lowercase(Locale.ROOT).matches(SubtitleFontUtils.FONT_FILE_REGEX) }
         .orEmpty()
 
     val entries = mutableListOf<CustomFontEntry>()

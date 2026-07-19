@@ -34,6 +34,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -164,9 +165,17 @@ class PlayerViewModel(
   private val volumeBoostCap by MPVLib.propInt["volume-max"].collectAsState(viewModelScope)
 
   init {
-    // Poll precise position only when playing
+    // Poll precise position only when playing.
+    // PERF FIX: suspend (no JNI polling) while paused — previously this polled
+    // every 42ms even when paused or in background, wasting CPU/battery.
     viewModelScope.launch {
+      val pauseFlow = MPVLib.propBoolean["pause"]
       while (isActive) {
+        if (pauseFlow.value == true) {
+          // Sync once so UI shows the exact paused position, then wait for unpause
+          MPVLib.getPropertyDouble("time-pos")?.let { _precisePosition.value = it.toFloat() }
+          pauseFlow.first { it != true }
+        }
         val time = MPVLib.getPropertyDouble("time-pos")
         if (time != null) {
           _precisePosition.value = time.toFloat()
@@ -752,12 +761,47 @@ class PlayerViewModel(
     val primarySid = MPVLib.getPropertyInt("sid") ?: 0
     val secondarySid = MPVLib.getPropertyInt("secondary-sid") ?: 0
 
+    val enabledNewTrack: Boolean
     when {
-      id == primarySid -> MPVLib.setPropertyString("sid", "no")
-      id == secondarySid -> MPVLib.setPropertyString("secondary-sid", "no")
-      primarySid <= 0 -> MPVLib.setPropertyInt("sid", id)
-      secondarySid <= 0 -> MPVLib.setPropertyInt("secondary-sid", id)
-      else -> MPVLib.setPropertyInt("sid", id)
+      id == primarySid -> {
+        MPVLib.setPropertyString("sid", "no")
+        enabledNewTrack = false
+      }
+      id == secondarySid -> {
+        MPVLib.setPropertyString("secondary-sid", "no")
+        enabledNewTrack = false
+      }
+      primarySid <= 0 -> {
+        MPVLib.setPropertyInt("sid", id)
+        enabledNewTrack = true
+      }
+      secondarySid <= 0 -> {
+        MPVLib.setPropertyInt("secondary-sid", id)
+        enabledNewTrack = true
+      }
+      else -> {
+        MPVLib.setPropertyInt("sid", id)
+        enabledNewTrack = true
+      }
+    }
+
+    if (enabledNewTrack) refreshSubtitleAtCurrentPosition()
+  }
+
+  /**
+   * Forces the newly selected subtitle track to display immediately.
+   *
+   * When switching embedded text-subtitle tracks mid-playback, mpv's demuxer has
+   * already discarded the current cue for the newly enabled track, so nothing is
+   * shown until the NEXT subtitle line arrives (often several seconds). There is
+   * no audio-sync or other special mechanism behind this delay — it is purely a
+   * demuxer limitation. A zero-length exact seek forces the demuxer to re-read
+   * packets at the current position (with subtitle preroll), making the current
+   * line appear instantly, matching the behavior of players like Next Player.
+   */
+  private fun refreshSubtitleAtCurrentPosition() {
+    runCatching {
+      MPVLib.command("seek", "0", "exact")
     }
   }
 
