@@ -294,6 +294,21 @@ object SubtitlesPreferencesScreen : Screen {
 
               PreferenceDivider()
 
+              val forceBottom by preferences.forceSubtitlesBottom.collectAsState()
+              SwitchPreference(
+                value = forceBottom,
+                onValueChange = { preferences.forceSubtitlesBottom.set(it) },
+                title = { Text(stringResource(R.string.pref_subtitles_force_bottom)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.pref_subtitles_force_bottom_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+              )
+
+              PreferenceDivider()
+
               val scaleByWindow by preferences.scaleByWindow.collectAsState()
               SwitchPreference(
                 value = scaleByWindow,

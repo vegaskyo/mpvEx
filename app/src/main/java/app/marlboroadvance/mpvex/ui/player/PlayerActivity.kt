@@ -1948,8 +1948,15 @@ class PlayerActivity :
 
     // Miscellaneous settings
     val overrideAssSubs = subtitlesPreferences.overrideAssSubs.get()
-    MPVLib.setPropertyString("sub-ass-override", if (overrideAssSubs) "force" else "scale")
-    MPVLib.setPropertyString("secondary-sub-ass-override", if (overrideAssSubs) "force" else "scale")
+    val forceBottom = subtitlesPreferences.forceSubtitlesBottom.get()
+    val assOverride = if (overrideAssSubs || forceBottom) "force" else "scale"
+    MPVLib.setPropertyString("sub-ass-override", assOverride)
+    MPVLib.setPropertyString("secondary-sub-ass-override", assOverride)
+    if (forceBottom) {
+      // Secondary subtitle defaults to the TOP of the video in mpv — pin it to
+      // the bottom so all subtitles stay at the bottom.
+      MPVLib.setPropertyInt("secondary-sub-pos", 100)
+    }
 
     val scaleByWindow = subtitlesPreferences.scaleByWindow.get()
     val scaleValue = if (scaleByWindow) "yes" else "no"

@@ -46,6 +46,10 @@ class SubtitlesPreferences(
   val subPos = preferenceStore.getInt("sub_pos", 100)
 
   val overrideAssSubs = preferenceStore.getBoolean("sub_override_ass")
+
+  // Force ALL subtitles (including secondary track and ASS-positioned lines)
+  // to display at the bottom of the video.
+  val forceSubtitlesBottom = preferenceStore.getBoolean("sub_force_bottom", true)
   val scaleByWindow = preferenceStore.getBoolean("sub_scale_by_window", true)
 
   val defaultSubDelay = preferenceStore.getInt("sub_default_delay")

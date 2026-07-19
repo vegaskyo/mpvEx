@@ -293,6 +293,8 @@
   <string name="player_sheets_sub_typography_font">Font</string>
   <string name="player_sheets_sub_typography_font_weight">Font weight</string>
   <string name="pref_subtitles_import_font">Import font files</string>
+  <string name="pref_subtitles_force_bottom">Always show subtitles at the bottom</string>
+  <string name="pref_subtitles_force_bottom_summary">Pins the secondary track to the bottom and overrides ASS-positioned lines. Disable to keep original ASS typesetting (signs, top notes)</string>
   <string name="pref_subtitles_import_font_summary">Add .ttf, .otf or .ttc fonts (WOFF/WOFF2 not supported)</string>
   <string name="toast_fonts_imported">Imported %d font(s)</string>
   <string name="toast_font_import_invalid">Unsupported file type. Use .ttf, .otf or .ttc</string>

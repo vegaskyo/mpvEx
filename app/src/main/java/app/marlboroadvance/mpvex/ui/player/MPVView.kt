@@ -280,13 +280,31 @@ class MPVView(
     }
     // If blank, MPV uses its default font
 
-    if (subtitlesPreferences.overrideAssSubs.get()) {
-      MPVLib.setOptionString("sub-ass-override", "force")
-      MPVLib.setOptionString("sub-ass-justify", "yes")
-      MPVLib.setOptionString("secondary-sub-ass-override", "force")
-    } else {
-      MPVLib.setOptionString("sub-ass-override", "no")
-      MPVLib.setOptionString("secondary-sub-ass-override", "no")
+    // Positioning: mpv places the secondary subtitle at the TOP by default,
+    // and ASS subs can position lines anywhere (\an8 etc.). When
+    // forceSubtitlesBottom is on we pin the secondary track to the bottom and
+    // force-override ASS styles so positioned lines fall back to the bottom.
+    val forceBottom = subtitlesPreferences.forceSubtitlesBottom.get()
+    if (forceBottom) {
+      MPVLib.setOptionString("secondary-sub-pos", "100")
+    }
+
+    when {
+      subtitlesPreferences.overrideAssSubs.get() -> {
+        MPVLib.setOptionString("sub-ass-override", "force")
+        MPVLib.setOptionString("sub-ass-justify", "yes")
+        MPVLib.setOptionString("secondary-sub-ass-override", "force")
+      }
+      forceBottom -> {
+        // Override ASS positioning/styles so lines render at the configured
+        // (bottom) position, without the justify tweak.
+        MPVLib.setOptionString("sub-ass-override", "force")
+        MPVLib.setOptionString("secondary-sub-ass-override", "force")
+      }
+      else -> {
+        MPVLib.setOptionString("sub-ass-override", "no")
+        MPVLib.setOptionString("secondary-sub-ass-override", "no")
+      }
     }
 
     // Typography and styling for both primary and secondary
