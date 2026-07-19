@@ -11,6 +11,9 @@ import android.util.Log
 import app.marlboroadvance.mpvex.domain.media.model.Video
 import app.marlboroadvance.mpvex.utils.media.MediaInfoOps
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -164,14 +167,14 @@ object VideoScanUtils {
         context: Context,
         folder: File,
         videosMap: MutableMap<String, Video>
-    ): Unit = kotlinx.coroutines.coroutineScope {
+    ): Unit = coroutineScope {
         try {
             val files = folder.listFiles() ?: return@coroutineScope
 
             // PERF FIX: metadata extraction (MediaInfo parse) was previously done
             // sequentially per file, making large-folder scans very slow.
             // Process files in parallel with bounded concurrency.
-            val semaphore = kotlinx.coroutines.sync.Semaphore(METADATA_SCAN_CONCURRENCY)
+            val semaphore = Semaphore(METADATA_SCAN_CONCURRENCY)
             val candidates = files.filter { file ->
                 file.isFile &&
                     FileTypeUtils.VIDEO_EXTENSIONS.contains(file.extension.lowercase(Locale.getDefault())) &&
@@ -179,7 +182,7 @@ object VideoScanUtils {
             }
 
             val scanned = candidates.map { file ->
-                kotlinx.coroutines.async(Dispatchers.IO) {
+                async(Dispatchers.IO) {
                     semaphore.withPermit {
                         runCatching { scanSingleFile(context, folder, file) }
                             .onFailure { e -> Log.w(TAG, "Error processing file: ${file.absolutePath}", e) }
