@@ -1,6 +1,5 @@
 package app.marlboroadvance.mpvex.ui.player.controls.components.panels
 
-import android.annotation.SuppressLint
 import androidx.annotation.StringRes
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -44,7 +43,9 @@ import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.R
 import app.marlboroadvance.mpvex.preferences.SubtitleJustification
 import app.marlboroadvance.mpvex.preferences.SubtitlesPreferences
+import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.preferences.preference.deleteAndGet
+import app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils
 import app.marlboroadvance.mpvex.presentation.components.ExpandableCard
 import app.marlboroadvance.mpvex.presentation.components.ExposedTextDropDownMenu
 import app.marlboroadvance.mpvex.presentation.components.SliderItem
@@ -63,14 +64,16 @@ import me.zhanghai.compose.preference.ProvidePreferenceLocals
 import me.zhanghai.compose.preference.preferenceTheme
 import org.koin.compose.koinInject
 
-@SuppressLint("MutableCollectionMutableState")
 @Composable
 fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
   val context = LocalContext.current
   val preferences = koinInject<SubtitlesPreferences>()
   val fileManager = koinInject<FileManager>()
   var isExpanded by remember { mutableStateOf(true) }
-  val fonts by remember { mutableStateOf(mutableListOf<String>("Default")) }
+  // Immutable list in snapshot state: mutating a MutableList in place does not
+  // notify Compose, so the dropdown only refreshed by accident (when the
+  // loading indicator changed at the same time).
+  var fonts by remember { mutableStateOf(listOf("Default")) }
   var fontsLoadingIndicator: (@Composable () -> Unit)? by remember {
     val indicator: (@Composable () -> Unit) = {
       CircularProgressIndicator(Modifier.size(32.dp))
@@ -78,22 +81,24 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
     mutableStateOf(indicator)
   }
   LaunchedEffect(Unit) {
-    withContext(Dispatchers.IO) {
-      val fontsDir = fileManager.fromPath(context.filesDir.path + "/fonts")
-      if (fileManager.exists(fontsDir)) {
-        fonts.addAll(
+    val loaded =
+      withContext(Dispatchers.IO) {
+        val fontsDir = fileManager.fromPath(context.filesDir.path + "/fonts")
+        if (!fileManager.exists(fontsDir)) {
+          emptyList()
+        } else {
           fileManager
             .listFiles(fontsDir)
-            .filter { fileManager.isFile(it) && fileManager.getName(it).lowercase().matches(".*\\.[ot]tf$".toRegex()) }
+            .filter { fileManager.isFile(it) && fileManager.getName(it).lowercase().matches(SubtitleFontUtils.FONT_FILE_REGEX) }
             .mapNotNull {
               runCatching {
-                TTFFile.open(fileManager.getInputStream(it) ?: return@mapNotNull null).families.values.first()
+                TTFFile.open(fileManager.getInputStream(it) ?: return@mapNotNull null).families.values.firstOrNull()
               }.getOrNull()
             }.distinct()
-        )
+        }
       }
-      fontsLoadingIndicator = null
-    }
+    fonts = listOf("Default") + loaded
+    fontsLoadingIndicator = null
   }
 
   ExpandableCard(
@@ -111,13 +116,11 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
     colors = panelCardsColors(),
   ) {
     Column {
-      val isBold by MPVLib.propBoolean["sub-bold"].collectAsState()
       val isItalic by MPVLib.propBoolean["sub-italic"].collectAsState()
       val mpvJustify by MPVLib.propString["sub-justify"].collectAsState()
       val justify by remember {
         derivedStateOf { SubtitleJustification.entries.first { it.value == mpvJustify } }
       }
-      val font by MPVLib.propString["sub-font"].collectAsState()
       val fontSize by MPVLib.propInt["sub-font-size"].collectAsState()
       val mpvBorderStyle by MPVLib.propString["sub-border-style"].collectAsState()
       val borderStyle by remember {
@@ -132,19 +135,6 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
           .padding(start = MaterialTheme.spacing.extraSmall, end = MaterialTheme.spacing.medium),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        IconToggleButton(
-          checked = isBold == true,
-          onCheckedChange = {
-            preferences.bold.set(it)
-            MPVLib.setPropertyBoolean("sub-bold", it)
-          },
-        ) {
-          Icon(
-            Icons.Default.FormatBold,
-            null,
-            modifier = Modifier.size(32.dp),
-          )
-        }
         IconToggleButton(
           checked = isItalic == true,
           onCheckedChange = {
@@ -199,17 +189,36 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
           modifier = Modifier.size(32.dp),
         )
         ExposedTextDropDownMenu(
-          selectedValue = font!!.ifEmpty { "Default" },
+          selectedValue = preferences.font.collectAsState().value.ifEmpty { "Default" },
           options = fonts.toImmutableList(),
           label = stringResource(R.string.player_sheets_sub_typography_font),
           onValueChangedEvent = {
             val actualFont = if (it == "Default") "" else it
             preferences.font.set(actualFont)
-            MPVLib.setPropertyString("sub-font", actualFont)
-            MPVLib.setPropertyString("secondary-sub-font", actualFont)
+            // Re-apply with the current weight so e.g. "Inter 18pt" + 600
+            // resolves to the real SemiBold face
+            SubtitleFontUtils.applyFontWithWeight(actualFont, preferences.fontWeight.get())
           },
           leadingIcon = fontsLoadingIndicator,
         )
+      }
+      // Font weight (boldness) slider — replaces the old on/off Bold button.
+      // 100 (Thin) .. 900 (Black); uses real weight faces when the selected
+      // family provides them, synthetic bold otherwise (>= 600).
+      val fontWeight by preferences.fontWeight.collectAsState()
+      SliderItem(
+        label = stringResource(R.string.player_sheets_sub_typography_font_weight),
+        max = 9,
+        min = 1,
+        value = (fontWeight / 100).coerceIn(1, 9),
+        valueText = SubtitleFontUtils.weightLabel(fontWeight),
+        onChange = { step ->
+          val weight = step * 100
+          preferences.fontWeight.set(weight)
+          SubtitleFontUtils.applyFontWithWeight(preferences.font.get(), weight)
+        },
+      ) {
+        Icon(Icons.Default.FormatBold, null)
       }
       SliderItem(
         label = stringResource(R.string.player_sheets_sub_typography_font_size),
@@ -268,14 +277,21 @@ fun SubtitleSettingsTypographyCard(modifier: Modifier = Modifier) {
 }
 
 fun resetTypography(preferences: SubtitlesPreferences) {
-  MPVLib.setPropertyBoolean("sub-bold", preferences.bold.deleteAndGet())
+  preferences.bold.delete()
   MPVLib.setPropertyBoolean("sub-italic", preferences.italic.deleteAndGet())
   MPVLib.setPropertyBoolean("sub-ass-justify", false)
   MPVLib.setPropertyString("sub-justify", preferences.justification.deleteAndGet().value)
-  MPVLib.setPropertyString("sub-font", preferences.font.deleteAndGet())
-  MPVLib.setPropertyString("secondary-sub-font", preferences.font.get())
+
+  // Font family + weight must be reset together: resolveFontForWeight() may have
+  // left a weight-specific family (e.g. "Inter 18pt SemiBold") and sub-bold set,
+  // so re-apply through applyFontWithWeight() instead of writing sub-font alone.
+  preferences.fontWeight.delete()
+  SubtitleFontUtils.applyFontWithWeight(preferences.font.deleteAndGet(), preferences.fontWeight.get())
+
   MPVLib.setPropertyInt("sub-font-size", preferences.fontSize.deleteAndGet())
-  MPVLib.setPropertyInt("sub-border-size", preferences.borderSize.deleteAndGet())
+  // "sub-outline-size" is the name used everywhere else (the slider above reads
+  // and writes it); "sub-border-size" is only a deprecated alias.
+  MPVLib.setPropertyInt("sub-outline-size", preferences.borderSize.deleteAndGet())
   MPVLib.setPropertyInt("sub-shadow-offset", preferences.shadowOffset.deleteAndGet())
   MPVLib.setPropertyString("sub-border-style", preferences.borderStyle.deleteAndGet().value)
 }

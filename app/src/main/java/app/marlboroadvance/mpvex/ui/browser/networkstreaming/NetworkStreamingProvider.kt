@@ -11,6 +11,7 @@ import android.util.Log
 import app.marlboroadvance.mpvex.domain.network.NetworkConnection
 import app.marlboroadvance.mpvex.ui.browser.networkstreaming.clients.NetworkClientFactory
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * ContentProvider for streaming network files to MPV player
@@ -19,10 +20,13 @@ class NetworkStreamingProvider : ContentProvider() {
   companion object {
     private const val TAG = "NetworkStreamingProvider"
 
-    // Cache for active connections
-    private val connectionCache = mutableMapOf<Long, NetworkConnection>()
+    // Cache for active connections.
+    // ConcurrentHashMap: openFile() runs on arbitrary binder threads while
+    // setConnection()/clearCache() are called from the UI thread — plain
+    // LinkedHashMaps here could drop entries or throw ConcurrentModificationException.
+    private val connectionCache = ConcurrentHashMap<Long, NetworkConnection>()
     private val clientCache =
-      mutableMapOf<Long, app.marlboroadvance.mpvex.ui.browser.networkstreaming.clients.NetworkClient>()
+      ConcurrentHashMap<Long, app.marlboroadvance.mpvex.ui.browser.networkstreaming.clients.NetworkClient>()
 
     fun getUri(context: android.content.Context, connectionId: Long, filePath: String): Uri {
       val authority = "${context.packageName}.networkstreaming"
@@ -108,8 +112,15 @@ class NetworkStreamingProvider : ContentProvider() {
       val readFd = pipe[0]
       val writeFd = pipe[1]
 
-      // Stream the file in a background thread
-      Thread {
+      // Stream the file in a background thread.
+      // NOTE (perf review): this pipe-based path performs a sequential full-file
+      // copy and cannot seek. It is NOT used for playback — NetworkBrowserViewModel
+      // routes all playback (SMB/FTP/WebDAV) through NetworkStreamingProxy, which
+      // supports HTTP Range requests for seeking. This provider only remains as a
+      // fallback for external consumers of the content:// URI.
+      // The copy loop terminates as soon as the reader closes the pipe
+      // (output.write throws IOException -> closeWithError below).
+      val copyThread = Thread {
         try {
           // Ensure connected
           runBlocking {
@@ -123,7 +134,8 @@ class NetworkStreamingProvider : ContentProvider() {
             client.getFileStream(filePath).onSuccess { inputStream ->
               ParcelFileDescriptor.AutoCloseOutputStream(writeFd).use { output ->
                 inputStream.use { input ->
-                  val buffer = ByteArray(8192)
+                  // 64KB buffer: fewer syscalls/network round-trips than 8KB
+                  val buffer = ByteArray(64 * 1024)
                   var bytesRead: Int
 
                   while (input.read(buffer).also { bytesRead = it } != -1) {
@@ -142,8 +154,20 @@ class NetworkStreamingProvider : ContentProvider() {
             // Ignore
           }
         }
-      }.start()
+      }.apply {
+        name = "NetworkStreamCopy"
+        isDaemon = true
+      }
 
+      try {
+        copyThread.start()
+      } catch (e: Throwable) {
+        // Nothing will ever write to (or close) the pipe — close both ends so we
+        // don't leak the file descriptors.
+        runCatching { writeFd.close() }
+        runCatching { readFd.close() }
+        throw e
+      }
 
       return readFd
     } catch (e: Exception) {

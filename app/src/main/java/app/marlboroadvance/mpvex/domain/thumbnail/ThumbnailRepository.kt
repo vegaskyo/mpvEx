@@ -33,7 +33,10 @@ class ThumbnailRepository(
     ) 
   }
   private val diskCacheDimension = 1024
-  private val diskJpegQuality = 100
+
+  // PERF FIX: was 100 — JPEG q100 is ~2-3x larger on disk and much slower to
+  // encode for no visible gain on grid thumbnails.
+  private val diskJpegQuality = 90
   private val memoryCache: LruCache<String, Bitmap>
   private val diskDir: File = File(context.filesDir, "thumbnails").apply { mkdirs() }
   private val ongoingOperations = ConcurrentHashMap<String, Deferred<Bitmap?>>()
@@ -48,6 +51,9 @@ class ThumbnailRepository(
 
   private val folderStates = ConcurrentHashMap<String, FolderState>()
   private val folderJobs = ConcurrentHashMap<String, Job>()
+
+  /** Folder ids in start order, so eviction picks the genuinely oldest job. */
+  private val folderJobOrder = java.util.concurrent.CopyOnWriteArrayList<String>()
   
   // Track videos that failed with FastThumbnails and should use MediaStore
   private val useMediaStoreForVideo = ConcurrentHashMap<String, Boolean>()
@@ -84,57 +90,62 @@ class ThumbnailRepository(
 
       memoryCache.get(key)?.let { return@withContext it }
 
-      ongoingOperations[key]?.let {
-        return@withContext it.await()
-      }
-
+      // Deduplicate concurrent requests for the same key. The previous
+      // check-then-put was racy: two callers could both miss and each start a
+      // full (expensive) generation for the same thumbnail. computeIfAbsent
+      // makes lookup-and-register atomic.
+      // The work runs on repositoryScope (not the caller's scope) so that one
+      // caller giving up — e.g. a folder job cancelled when the user scrolls
+      // away — no longer cancels the shared result out from under everyone else
+      // waiting on the same key.
       val deferred =
-        async {
-          try {
-            loadFromDisk(video)?.let { thumbnail ->
-              memoryCache.put(key, thumbnail)
-              _thumbnailReadyKeys.tryEmit(key)
-              return@async thumbnail
-            }
+        ongoingOperations.computeIfAbsent(key) {
+          repositoryScope.async {
+            try {
+              loadFromDisk(video, widthPx, heightPx)?.let { cached ->
+                memoryCache.put(key, cached)
+                _thumbnailReadyKeys.tryEmit(key)
+                return@async cached
+              }
 
-            if (isNetworkUrl(video.path) && !appearancePreferences.showNetworkThumbnails.get()) {
-              return@async null
-            }
+              if (isNetworkUrl(video.path) && !appearancePreferences.showNetworkThumbnails.get()) {
+                return@async null
+              }
 
-            // Check if this video should use MediaStore
-            val videoKey = videoBaseKey(video)
-            val thumbnail = if (useMediaStoreForVideo.containsKey(videoKey)) {
-              // Use MediaStore for this video
-              android.util.Log.d("ThumbnailRepository", "Using MediaStore for ${video.displayName}")
-              generateWithMediaStore(video, diskCacheDimension)
-            } else {
-              // Try FastThumbnails first
-              val fastResult = generateWithFastThumbnails(video, diskCacheDimension)
-              if (fastResult == null) {
-                // FastThumbnails failed, mark for MediaStore and try it
-                android.util.Log.w("ThumbnailRepository", "FastThumbnails failed for ${video.displayName}, falling back to MediaStore")
-                useMediaStoreForVideo[videoKey] = true
+              // Check if this video should use MediaStore
+              val videoKey = videoBaseKey(video)
+              val thumbnail = if (useMediaStoreForVideo.containsKey(videoKey)) {
+                // Use MediaStore for this video
+                android.util.Log.d("ThumbnailRepository", "Using MediaStore for ${video.displayName}")
                 generateWithMediaStore(video, diskCacheDimension)
               } else {
-                fastResult
+                // Try FastThumbnails first
+                val fastResult = generateWithFastThumbnails(video, diskCacheDimension)
+                if (fastResult == null) {
+                  // FastThumbnails failed, mark for MediaStore and try it
+                  android.util.Log.w("ThumbnailRepository", "FastThumbnails failed for ${video.displayName}, falling back to MediaStore")
+                  useMediaStoreForVideo[videoKey] = true
+                  generateWithMediaStore(video, diskCacheDimension)
+                } else {
+                  fastResult
+                }
               }
+
+              if (thumbnail == null) {
+                return@async null
+              }
+
+              memoryCache.put(key, thumbnail)
+              _thumbnailReadyKeys.tryEmit(key)
+              writeToDisk(video, thumbnail)
+
+              thumbnail
+            } finally {
+              ongoingOperations.remove(key)
             }
-
-            if (thumbnail == null) {
-              return@async null
-            }
-
-            memoryCache.put(key, thumbnail)
-            _thumbnailReadyKeys.tryEmit(key)
-            writeToDisk(video, thumbnail)
-
-            thumbnail
-          } finally {
-            ongoingOperations.remove(key)
           }
         }
 
-      ongoingOperations[key] = deferred
       return@withContext deferred.await()
     }
 
@@ -150,7 +161,7 @@ class ThumbnailRepository(
       
       val key = thumbnailKey(video, widthPx, heightPx)
       synchronized(memoryCache) { memoryCache.get(key) }?.let { return@withContext it }
-      loadFromDisk(video)?.let { thumbnail ->
+      loadFromDisk(video, widthPx, heightPx)?.let { thumbnail ->
         synchronized(memoryCache) { memoryCache.put(key, thumbnail) }
         return@withContext thumbnail
       }
@@ -173,6 +184,7 @@ class ThumbnailRepository(
   fun clearThumbnailCache() {
     folderJobs.values.forEach { it.cancel() }
     folderJobs.clear()
+    folderJobOrder.clear()
     folderStates.clear()
     ongoingOperations.clear()
     useMediaStoreForVideo.clear()
@@ -205,10 +217,13 @@ class ThumbnailRepository(
     folderJobs.entries.removeAll { !it.value.isActive }
     
     if (folderJobs.size >= maxconcurrentfolders && !folderJobs.containsKey(folderId)) {
-      folderJobs.entries.firstOrNull()?.let { (oldestId, job) ->
-        job.cancel()
-        folderJobs.remove(oldestId)
+      // ConcurrentHashMap has no insertion order, so "first entry" was an
+      // arbitrary victim. folderJobOrder tracks the real start order.
+      val oldestId = folderJobOrder.firstOrNull { folderJobs.containsKey(it) }
+      if (oldestId != null) {
+        folderJobs.remove(oldestId)?.cancel()
         folderStates.remove(oldestId)
+        folderJobOrder.remove(oldestId)
       }
     }
     
@@ -223,6 +238,8 @@ class ThumbnailRepository(
       }!!
 
     folderJobs.remove(folderId)?.cancel()
+    folderJobOrder.remove(folderId)
+    folderJobOrder.add(folderId)
     folderJobs[folderId] =
       repositoryScope.launch {
         var i = state.nextIndex
@@ -269,16 +286,39 @@ class ThumbnailRepository(
     }
   }
 
-  private fun loadFromDisk(video: Video): Bitmap? {
+  private fun loadFromDisk(
+    video: Video,
+    reqWidthPx: Int = 0,
+    reqHeightPx: Int = 0,
+  ): Bitmap? {
     val diskFile = File(diskDir, keyToFileName(diskKey(video)))
     if (!diskFile.exists()) return null
     return runCatching {
-      val options =
-        BitmapFactory.Options().apply {
-          inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
+      // PERF FIX: subsample the decode to the requested cell size instead of
+      // always decoding the full 1024px cached image into ARGB_8888.
+      val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+      if (reqWidthPx > 0 && reqHeightPx > 0) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(diskFile.absolutePath, bounds)
+        options.inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, reqWidthPx, reqHeightPx)
+      }
       BitmapFactory.decodeFile(diskFile.absolutePath, options)
     }.getOrNull()
+  }
+
+  /** Largest power-of-2 subsample that keeps both dimensions >= requested size. */
+  private fun calculateInSampleSize(
+    srcWidth: Int,
+    srcHeight: Int,
+    reqWidth: Int,
+    reqHeight: Int,
+  ): Int {
+    var inSampleSize = 1
+    if (srcWidth <= 0 || srcHeight <= 0) return inSampleSize
+    while (srcWidth / (inSampleSize * 2) >= reqWidth && srcHeight / (inSampleSize * 2) >= reqHeight) {
+      inSampleSize *= 2
+    }
+    return inSampleSize
   }
 
   private fun writeToDisk(video: Video, bitmap: Bitmap) {

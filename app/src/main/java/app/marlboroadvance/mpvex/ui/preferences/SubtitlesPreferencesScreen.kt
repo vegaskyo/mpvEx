@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +55,7 @@ import app.marlboroadvance.mpvex.preferences.preference.collectAsState
 import app.marlboroadvance.mpvex.presentation.Screen
 import app.marlboroadvance.mpvex.ui.utils.LocalBackStack
 import app.marlboroadvance.mpvex.utils.media.CustomFontEntry
+import app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils
 import app.marlboroadvance.mpvex.utils.media.copyFontsFromDirectory
 import app.marlboroadvance.mpvex.utils.media.loadCustomFontEntries
 import com.github.k1rakishou.fsaf.FileManager
@@ -81,6 +83,10 @@ object SubtitlesPreferencesScreen : Screen {
     val backstack = LocalBackStack.current
     val preferences = koinInject<SubtitlesPreferences>()
     val fileManager = koinInject<FileManager>()
+    // Font copying/importing is tied to this screen — a bare
+    // CoroutineScope(Dispatchers.IO) would keep running (and keep writing to
+    // composition state) after the user navigates away.
+    val screenScope = rememberCoroutineScope()
 
     Scaffold(
       topBar = {
@@ -125,12 +131,55 @@ object SubtitlesPreferencesScreen : Screen {
             preferences.fontsFolder.set(uri.toString())
 
             // Copy fonts immediately in background
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            screenScope.launch {
               isLoadingFonts = true
-              copyFontsFromDirectory(context, fileManager, uri.toString())
-              withContext(Dispatchers.Main) {
-                fontLoadTrigger++
-                isLoadingFonts = false
+              withContext(Dispatchers.IO) {
+                copyFontsFromDirectory(context, fileManager, uri.toString())
+              }
+              fontLoadTrigger++
+              isLoadingFonts = false
+            }
+          }
+
+        // Picker for importing individual font files (.ttf/.otf/.ttc) which are
+        // copied into the app's internal fonts directory and persist there.
+        val fontFilePicker =
+          rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenMultipleDocuments(),
+          ) { uris ->
+            if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
+            screenScope.launch {
+              isLoadingFonts = true
+              var imported = 0
+              var rejected = 0
+              withContext(Dispatchers.IO) {
+                uris.forEach { uri ->
+                  val name =
+                    DocumentFile.fromSingleUri(context, uri)?.name
+                      ?: uri.lastPathSegment?.substringAfterLast('/')
+                      ?: return@forEach
+                  if (SubtitleFontUtils.sanitizeFontFileName(name) == null) {
+                    rejected++
+                    return@forEach
+                  }
+                  val family =
+                    SubtitleFontUtils.importFontFile(context, name) {
+                      context.contentResolver.openInputStream(uri)
+                    }
+                  if (family != null) imported++ else rejected++
+                }
+              }
+              fontLoadTrigger++
+              isLoadingFonts = false
+              if (imported > 0) {
+                android.widget.Toast
+                  .makeText(context, context.getString(R.string.toast_fonts_imported, imported), android.widget.Toast.LENGTH_SHORT)
+                  .show()
+              }
+              if (rejected > 0) {
+                android.widget.Toast
+                  .makeText(context, R.string.toast_font_import_invalid, android.widget.Toast.LENGTH_SHORT)
+                  .show()
               }
             }
           }
@@ -248,6 +297,21 @@ object SubtitlesPreferencesScreen : Screen {
 
               PreferenceDivider()
 
+              val forceBottom by preferences.forceSubtitlesBottom.collectAsState()
+              SwitchPreference(
+                value = forceBottom,
+                onValueChange = { preferences.forceSubtitlesBottom.set(it) },
+                title = { Text(stringResource(R.string.pref_subtitles_force_bottom)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.pref_subtitles_force_bottom_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+              )
+
+              PreferenceDivider()
+
               val scaleByWindow by preferences.scaleByWindow.collectAsState()
               SwitchPreference(
                 value = scaleByWindow,
@@ -319,13 +383,13 @@ object SubtitlesPreferencesScreen : Screen {
                       } else {
                         IconButton(
                           onClick = {
-                            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                            screenScope.launch {
                               isLoadingFonts = true
-                              copyFontsFromDirectory(context, fileManager, fontsFolder)
-                              withContext(Dispatchers.Main) {
-                                fontLoadTrigger++
-                                isLoadingFonts = false
+                              withContext(Dispatchers.IO) {
+                                copyFontsFromDirectory(context, fileManager, fontsFolder)
                               }
+                              fontLoadTrigger++
+                              isLoadingFonts = false
                             }
                           },
                         ) {
@@ -354,6 +418,32 @@ object SubtitlesPreferencesScreen : Screen {
                   }
                 }
               }
+
+              PreferenceDivider()
+
+              // Import individual font files from anywhere on the device.
+              // Supported formats: TTF, OTF, TTC (libass). WOFF/WOFF2 are not supported.
+              Preference(
+                title = { Text(stringResource(R.string.pref_subtitles_import_font)) },
+                summary = {
+                  Text(
+                    stringResource(R.string.pref_subtitles_import_font_summary),
+                    color = MaterialTheme.colorScheme.outline,
+                  )
+                },
+                onClick = {
+                  fontFilePicker.launch(
+                    arrayOf(
+                      "font/ttf",
+                      "font/otf",
+                      "font/collection",
+                      "application/x-font-ttf",
+                      "application/x-font-opentype",
+                      "application/octet-stream",
+                    ),
+                  )
+                },
+              )
             }
           }
 

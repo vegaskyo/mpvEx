@@ -13,3 +13,7 @@ app/release
 /app/standard/
 /app/fdroid/
 /app/playstore/
+# Release signing (never commit)
+keystore.properties
+*.jks
+*.keystore

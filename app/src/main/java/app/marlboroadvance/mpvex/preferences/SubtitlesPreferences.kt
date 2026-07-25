@@ -19,7 +19,16 @@ class SubtitlesPreferences(
   val autoloadMatchingSubtitles = preferenceStore.getBoolean("sub_autoload_enabled", true)
 
   val fontsFolder = preferenceStore.getString("sub_fonts_folder")
-  val font = preferenceStore.getString("sub_font", "")
+
+  // Base font family. Defaults to the bundled Inter font.
+  val font =
+    preferenceStore.getString(
+      "sub_font",
+      app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils.DEFAULT_FONT_FAMILY,
+    )
+
+  // CSS-style font weight (100..900, step 100) applied via the weight slider.
+  val fontWeight = preferenceStore.getInt("sub_font_weight", 400)
   val fontSize = preferenceStore.getInt("sub_font_size", 55)
   val subScale = preferenceStore.getFloat("sub_scale", 1f)
   val borderSize = preferenceStore.getInt("sub_border_size", 3)
@@ -37,6 +46,10 @@ class SubtitlesPreferences(
   val subPos = preferenceStore.getInt("sub_pos", 100)
 
   val overrideAssSubs = preferenceStore.getBoolean("sub_override_ass")
+
+  // Force ALL subtitles (including secondary track and ASS-positioned lines)
+  // to display at the bottom of the video.
+  val forceSubtitlesBottom = preferenceStore.getBoolean("sub_force_bottom", true)
   val scaleByWindow = preferenceStore.getBoolean("sub_scale_by_window", true)
 
   val defaultSubDelay = preferenceStore.getInt("sub_default_delay")
