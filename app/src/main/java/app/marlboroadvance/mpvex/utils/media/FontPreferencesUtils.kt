@@ -30,13 +30,14 @@ fun copyFontsFromDirectory(
     if (sourceDir != null && fileManager.exists(sourceDir)) {
       fileManager.listFiles(sourceDir).forEach { file ->
         if (fileManager.isFile(file)) {
-          val fileName = fileManager.getName(file)
-          if (fileName.lowercase().matches(SubtitleFontUtils.FONT_FILE_REGEX)) {
-            val inputStream = fileManager.getInputStream(file) ?: return@forEach
-            val outputFile = File(destinationPath, fileName)
-            outputFile.outputStream().use { outputStream ->
-              inputStream.use { it.copyTo(outputStream) }
-            }
+          // Names come from a user-picked SAF tree, so never trust them as a
+          // path — sanitizeFontFileName() reduces them to a plain file name
+          // inside filesDir/fonts and rejects unsupported extensions.
+          val fileName = SubtitleFontUtils.sanitizeFontFileName(fileManager.getName(file)) ?: return@forEach
+          val inputStream = fileManager.getInputStream(file) ?: return@forEach
+          val outputFile = File(destinationPath, fileName)
+          outputFile.outputStream().use { outputStream ->
+            inputStream.use { it.copyTo(outputStream) }
           }
         }
       }
@@ -44,6 +45,10 @@ fun copyFontsFromDirectory(
   }.onFailure { e ->
     Log.e("SubtitlesPreferences", "Error copying fonts", e)
   }
+
+  // Keep the family cache in sync — this runs on a background thread, so it is
+  // safe to reparse here rather than on the UI thread during playback.
+  SubtitleFontUtils.refreshFamilyCache(context)
 }
 
 // getSimplifiedPathFromUri is defined in AdvancedPreferencesScreen.kt within this package.

@@ -238,8 +238,12 @@ fun resetColors(
   }
 }
 
-val getCurrentMPVColor: (SubColorType) -> Int = {
-  MPVLib.getPropertyString(it.property)?.uppercase()?.toColorInt() ?: 0xFFFFFFFF.toInt()
+// toColorInt() throws IllegalArgumentException on anything it can't parse, and
+// mpv is free to hand back a format we don't expect (or nothing at all when the
+// property is unset), so fall back to opaque white instead of crashing the panel.
+val getCurrentMPVColor: (SubColorType) -> Int = { type ->
+  runCatching { MPVLib.getPropertyString(type.property)?.uppercase()?.toColorInt() }
+    .getOrNull() ?: 0xFFFFFFFF.toInt()
 }
 
 /**

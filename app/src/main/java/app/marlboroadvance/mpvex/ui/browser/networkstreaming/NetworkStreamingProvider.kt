@@ -11,6 +11,7 @@ import android.util.Log
 import app.marlboroadvance.mpvex.domain.network.NetworkConnection
 import app.marlboroadvance.mpvex.ui.browser.networkstreaming.clients.NetworkClientFactory
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * ContentProvider for streaming network files to MPV player
@@ -19,10 +20,13 @@ class NetworkStreamingProvider : ContentProvider() {
   companion object {
     private const val TAG = "NetworkStreamingProvider"
 
-    // Cache for active connections
-    private val connectionCache = mutableMapOf<Long, NetworkConnection>()
+    // Cache for active connections.
+    // ConcurrentHashMap: openFile() runs on arbitrary binder threads while
+    // setConnection()/clearCache() are called from the UI thread — plain
+    // LinkedHashMaps here could drop entries or throw ConcurrentModificationException.
+    private val connectionCache = ConcurrentHashMap<Long, NetworkConnection>()
     private val clientCache =
-      mutableMapOf<Long, app.marlboroadvance.mpvex.ui.browser.networkstreaming.clients.NetworkClient>()
+      ConcurrentHashMap<Long, app.marlboroadvance.mpvex.ui.browser.networkstreaming.clients.NetworkClient>()
 
     fun getUri(context: android.content.Context, connectionId: Long, filePath: String): Uri {
       val authority = "${context.packageName}.networkstreaming"
@@ -116,7 +120,7 @@ class NetworkStreamingProvider : ContentProvider() {
       // fallback for external consumers of the content:// URI.
       // The copy loop terminates as soon as the reader closes the pipe
       // (output.write throws IOException -> closeWithError below).
-      Thread {
+      val copyThread = Thread {
         try {
           // Ensure connected
           runBlocking {
@@ -153,8 +157,17 @@ class NetworkStreamingProvider : ContentProvider() {
       }.apply {
         name = "NetworkStreamCopy"
         isDaemon = true
-      }.start()
+      }
 
+      try {
+        copyThread.start()
+      } catch (e: Throwable) {
+        // Nothing will ever write to (or close) the pipe — close both ends so we
+        // don't leak the file descriptors.
+        runCatching { writeFd.close() }
+        runCatching { readFd.close() }
+        throw e
+      }
 
       return readFd
     } catch (e: Exception) {

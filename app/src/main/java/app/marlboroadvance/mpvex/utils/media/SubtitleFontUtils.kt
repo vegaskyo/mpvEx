@@ -59,13 +59,10 @@ object SubtitleFontUtils {
   @Volatile
   private var cachedFamilies: Set<String>? = null
 
-  @Volatile
-  private var cachedFamiliesStamp: Long = -1L
-
   /**
    * Extracts the fonts bundled in assets/fonts to filesDir/fonts so mpv's
    * sub-fonts-dir can use them. Cheap no-op when files already exist with the
-   * same size. Safe to call from any thread.
+   * same size. Must be called off the main thread.
    */
   fun extractBundledFonts(context: Context) {
     runCatching {
@@ -74,33 +71,35 @@ object SubtitleFontUtils {
       val bundled = assets.list("fonts").orEmpty()
       for (name in bundled) {
         val dest = File(destDir, name)
+        // openFd() only works for assets stored uncompressed in the APK; .ttf is
+        // DEFLATE-compressed by default, so fall back to the stream's available()
+        // (AssetInputStream reports the *uncompressed* length). Without this
+        // fallback the size check never matched and every launch re-copied ~3MB.
         val assetSize =
-          runCatching { assets.openFd("fonts/$name").use { it.length } }.getOrDefault(-1L)
+          runCatching { assets.openFd("fonts/$name").use { it.length } }
+            .recoverCatching { assets.open("fonts/$name").use { it.available().toLong() } }
+            .getOrDefault(-1L)
         if (dest.exists() && assetSize > 0 && dest.length() == assetSize) continue
         assets.open("fonts/$name").use { input ->
           dest.outputStream().use { output -> input.copyTo(output) }
         }
       }
-      invalidateFamilyCache()
     }.onFailure { e ->
       Log.e(TAG, "Failed to extract bundled fonts", e)
     }
-  }
-
-  /** Invalidate the cached family list (call after importing/removing fonts). */
-  fun invalidateFamilyCache() {
-    cachedFamilies = null
-    cachedFamiliesStamp = -1L
+    // Always (re)build the family cache off the main thread so that the
+    // player's font resolution never has to parse font files on the UI thread.
+    refreshFamilyCache(context)
   }
 
   /**
-   * Lists all font family names installed in filesDir/fonts.
-   * Results are cached and invalidated when the directory's lastModified changes.
+   * Parses every font in filesDir/fonts and caches the family names.
+   *
+   * This opens and parses each font file, so it MUST be called from a
+   * background thread. [installedFamilies] only ever reads the cache.
    */
-  fun installedFamilies(context: Context): Set<String> {
+  fun refreshFamilyCache(context: Context): Set<String> {
     val fontsDir = File(context.filesDir, "fonts")
-    val stamp = fontsDir.lastModified()
-    cachedFamilies?.let { if (stamp == cachedFamiliesStamp) return it }
 
     val families =
       fontsDir
@@ -115,9 +114,18 @@ object SubtitleFontUtils {
         .orEmpty()
 
     cachedFamilies = families
-    cachedFamiliesStamp = stamp
     return families
   }
+
+  /**
+   * Font family names installed in filesDir/fonts.
+   *
+   * Non-blocking: returns the cache populated by [refreshFamilyCache] (called
+   * from App startup and after every import). Returns an empty set when the
+   * cache is cold, in which case [resolveFontForWeight] falls back to the base
+   * family + synthetic bold instead of blocking the caller with font parsing.
+   */
+  fun installedFamilies(): Set<String> = cachedFamilies.orEmpty()
 
   /**
    * Result of resolving a base family + CSS weight against installed fonts.
@@ -139,7 +147,6 @@ object SubtitleFontUtils {
    *   back to the base family with bold enabled for weights >= 600.
    */
   fun resolveFontForWeight(
-    context: Context,
     baseFamily: String,
     weight: Int,
   ): ResolvedFont {
@@ -150,7 +157,7 @@ object SubtitleFontUtils {
       else -> {
         val suffix = WEIGHT_SUFFIXES[weight]
         val candidate = suffix?.let { "$baseFamily $it" }
-        if (candidate != null && candidate in installedFamilies(context)) {
+        if (candidate != null && candidate in installedFamilies()) {
           ResolvedFont(candidate, false)
         } else {
           ResolvedFont(baseFamily, weight >= 600)
@@ -163,11 +170,10 @@ object SubtitleFontUtils {
    * Applies the given base family + weight to mpv (primary and secondary subs).
    */
   fun applyFontWithWeight(
-    context: Context,
     baseFamily: String,
     weight: Int,
   ) {
-    val resolved = resolveFontForWeight(context, baseFamily, weight)
+    val resolved = resolveFontForWeight(baseFamily, weight)
     MPVLib.setPropertyString("sub-font", resolved.family)
     MPVLib.setPropertyString("secondary-sub-font", resolved.family)
     MPVLib.setPropertyBoolean("sub-bold", resolved.bold)
@@ -175,8 +181,29 @@ object SubtitleFontUtils {
   }
 
   /**
-   * Copies a single font file (already validated by extension) into
-   * filesDir/fonts. Returns the detected family name, or null on failure.
+   * Reduces an untrusted display name (e.g. from a SAF `DocumentFile`) to a
+   * plain file name inside the fonts directory. Returns null when nothing
+   * usable is left, so a crafted name like `../../databases/x.ttf` can never
+   * escape filesDir/fonts.
+   */
+  fun sanitizeFontFileName(fileName: String): String? {
+    val base =
+      fileName
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .trim()
+        .trimStart('.')
+    if (base.isBlank() || base == "." || base == "..") return null
+    val ext = base.substringAfterLast('.', "").lowercase(Locale.ROOT)
+    if (ext !in SUPPORTED_FONT_EXTENSIONS) return null
+    return base
+  }
+
+  /**
+   * Copies a single font file into filesDir/fonts, refreshes the family cache
+   * and returns the detected family name (null on failure).
+   *
+   * Parses the font file, so it must be called from a background thread.
    */
   fun importFontFile(
     context: Context,
@@ -184,21 +211,22 @@ object SubtitleFontUtils {
     open: () -> java.io.InputStream?,
   ): String? =
     runCatching {
-      val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-      if (ext !in SUPPORTED_FONT_EXTENSIONS) return null
+      val safeName = sanitizeFontFileName(fileName) ?: return null
 
       val destDir = File(context.filesDir, "fonts").apply { mkdirs() }
-      val dest = File(destDir, fileName)
+      val dest = File(destDir, safeName)
       open()?.use { input ->
         dest.outputStream().use { output -> input.copyTo(output) }
       } ?: return null
 
-      invalidateFamilyCache()
-
       // Best-effort family detection for feedback / immediate use
-      runCatching {
-        dest.inputStream().use { TTFFile.open(it).families.values.firstOrNull() }
-      }.getOrNull() ?: fileName.substringBeforeLast('.')
+      val family =
+        runCatching {
+          dest.inputStream().use { TTFFile.open(it).families.values.firstOrNull() }
+        }.getOrNull() ?: safeName.substringBeforeLast('.')
+
+      refreshFamilyCache(context)
+      family
     }.onFailure { e ->
       Log.e(TAG, "Failed to import font $fileName", e)
     }.getOrNull()

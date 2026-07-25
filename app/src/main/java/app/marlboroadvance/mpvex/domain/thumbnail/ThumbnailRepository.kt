@@ -51,6 +51,9 @@ class ThumbnailRepository(
 
   private val folderStates = ConcurrentHashMap<String, FolderState>()
   private val folderJobs = ConcurrentHashMap<String, Job>()
+
+  /** Folder ids in start order, so eviction picks the genuinely oldest job. */
+  private val folderJobOrder = java.util.concurrent.CopyOnWriteArrayList<String>()
   
   // Track videos that failed with FastThumbnails and should use MediaStore
   private val useMediaStoreForVideo = ConcurrentHashMap<String, Boolean>()
@@ -87,57 +90,62 @@ class ThumbnailRepository(
 
       memoryCache.get(key)?.let { return@withContext it }
 
-      ongoingOperations[key]?.let {
-        return@withContext it.await()
-      }
-
+      // Deduplicate concurrent requests for the same key. The previous
+      // check-then-put was racy: two callers could both miss and each start a
+      // full (expensive) generation for the same thumbnail. computeIfAbsent
+      // makes lookup-and-register atomic.
+      // The work runs on repositoryScope (not the caller's scope) so that one
+      // caller giving up — e.g. a folder job cancelled when the user scrolls
+      // away — no longer cancels the shared result out from under everyone else
+      // waiting on the same key.
       val deferred =
-        async {
-          try {
-            loadFromDisk(video, widthPx, heightPx)?.let { thumbnail ->
-              memoryCache.put(key, thumbnail)
-              _thumbnailReadyKeys.tryEmit(key)
-              return@async thumbnail
-            }
+        ongoingOperations.computeIfAbsent(key) {
+          repositoryScope.async {
+            try {
+              loadFromDisk(video, widthPx, heightPx)?.let { cached ->
+                memoryCache.put(key, cached)
+                _thumbnailReadyKeys.tryEmit(key)
+                return@async cached
+              }
 
-            if (isNetworkUrl(video.path) && !appearancePreferences.showNetworkThumbnails.get()) {
-              return@async null
-            }
+              if (isNetworkUrl(video.path) && !appearancePreferences.showNetworkThumbnails.get()) {
+                return@async null
+              }
 
-            // Check if this video should use MediaStore
-            val videoKey = videoBaseKey(video)
-            val thumbnail = if (useMediaStoreForVideo.containsKey(videoKey)) {
-              // Use MediaStore for this video
-              android.util.Log.d("ThumbnailRepository", "Using MediaStore for ${video.displayName}")
-              generateWithMediaStore(video, diskCacheDimension)
-            } else {
-              // Try FastThumbnails first
-              val fastResult = generateWithFastThumbnails(video, diskCacheDimension)
-              if (fastResult == null) {
-                // FastThumbnails failed, mark for MediaStore and try it
-                android.util.Log.w("ThumbnailRepository", "FastThumbnails failed for ${video.displayName}, falling back to MediaStore")
-                useMediaStoreForVideo[videoKey] = true
+              // Check if this video should use MediaStore
+              val videoKey = videoBaseKey(video)
+              val thumbnail = if (useMediaStoreForVideo.containsKey(videoKey)) {
+                // Use MediaStore for this video
+                android.util.Log.d("ThumbnailRepository", "Using MediaStore for ${video.displayName}")
                 generateWithMediaStore(video, diskCacheDimension)
               } else {
-                fastResult
+                // Try FastThumbnails first
+                val fastResult = generateWithFastThumbnails(video, diskCacheDimension)
+                if (fastResult == null) {
+                  // FastThumbnails failed, mark for MediaStore and try it
+                  android.util.Log.w("ThumbnailRepository", "FastThumbnails failed for ${video.displayName}, falling back to MediaStore")
+                  useMediaStoreForVideo[videoKey] = true
+                  generateWithMediaStore(video, diskCacheDimension)
+                } else {
+                  fastResult
+                }
               }
+
+              if (thumbnail == null) {
+                return@async null
+              }
+
+              memoryCache.put(key, thumbnail)
+              _thumbnailReadyKeys.tryEmit(key)
+              writeToDisk(video, thumbnail)
+
+              thumbnail
+            } finally {
+              ongoingOperations.remove(key)
             }
-
-            if (thumbnail == null) {
-              return@async null
-            }
-
-            memoryCache.put(key, thumbnail)
-            _thumbnailReadyKeys.tryEmit(key)
-            writeToDisk(video, thumbnail)
-
-            thumbnail
-          } finally {
-            ongoingOperations.remove(key)
           }
         }
 
-      ongoingOperations[key] = deferred
       return@withContext deferred.await()
     }
 
@@ -176,6 +184,7 @@ class ThumbnailRepository(
   fun clearThumbnailCache() {
     folderJobs.values.forEach { it.cancel() }
     folderJobs.clear()
+    folderJobOrder.clear()
     folderStates.clear()
     ongoingOperations.clear()
     useMediaStoreForVideo.clear()
@@ -208,10 +217,13 @@ class ThumbnailRepository(
     folderJobs.entries.removeAll { !it.value.isActive }
     
     if (folderJobs.size >= maxconcurrentfolders && !folderJobs.containsKey(folderId)) {
-      folderJobs.entries.firstOrNull()?.let { (oldestId, job) ->
-        job.cancel()
-        folderJobs.remove(oldestId)
+      // ConcurrentHashMap has no insertion order, so "first entry" was an
+      // arbitrary victim. folderJobOrder tracks the real start order.
+      val oldestId = folderJobOrder.firstOrNull { folderJobs.containsKey(it) }
+      if (oldestId != null) {
+        folderJobs.remove(oldestId)?.cancel()
         folderStates.remove(oldestId)
+        folderJobOrder.remove(oldestId)
       }
     }
     
@@ -226,6 +238,8 @@ class ThumbnailRepository(
       }!!
 
     folderJobs.remove(folderId)?.cancel()
+    folderJobOrder.remove(folderId)
+    folderJobOrder.add(folderId)
     folderJobs[folderId] =
       repositoryScope.launch {
         var i = state.nextIndex

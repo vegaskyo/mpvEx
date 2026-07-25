@@ -55,16 +55,22 @@ fun SubtitlesMiscellaneousCard(modifier: Modifier = Modifier) {
   ) {
     ProvidePreferenceLocals {
       Column {
+        // "Force subtitles to bottom" also needs sub-ass-override=force to pull
+        // ASS-positioned lines down, so turning this switch off must not drop
+        // back to "scale" while that setting is still enabled.
+        fun assOverrideValue(override: Boolean) =
+          if (override || preferences.forceSubtitlesBottom.get()) "force" else "scale"
+
         var overrideAssSubs by remember {
-          mutableStateOf(MPVLib.getPropertyString("sub-ass-override") == "force")
+          mutableStateOf(preferences.overrideAssSubs.get())
         }
         SwitchPreference(
           overrideAssSubs,
           onValueChange = {
             overrideAssSubs = it
             preferences.overrideAssSubs.set(it)
-            MPVLib.setPropertyString("sub-ass-override", if (it) "force" else "scale")
-            MPVLib.setPropertyString("secondary-sub-ass-override", if (it) "force" else "scale")
+            MPVLib.setPropertyString("sub-ass-override", assOverrideValue(it))
+            MPVLib.setPropertyString("secondary-sub-ass-override", assOverrideValue(it))
           },
           { Text(stringResource(R.string.player_sheets_sub_override_ass)) },
         )
@@ -134,8 +140,8 @@ fun SubtitlesMiscellaneousCard(modifier: Modifier = Modifier) {
               }
               val defaultOverride = preferences.overrideAssSubs.deleteAndGet()
               overrideAssSubs = defaultOverride
-              MPVLib.setPropertyString("sub-ass-override", if (defaultOverride) "force" else "scale")
-              MPVLib.setPropertyString("secondary-sub-ass-override", if (defaultOverride) "force" else "scale")
+              MPVLib.setPropertyString("sub-ass-override", assOverrideValue(defaultOverride))
+              MPVLib.setPropertyString("secondary-sub-ass-override", assOverrideValue(defaultOverride))
               val defaultScaleByWindow = preferences.scaleByWindow.deleteAndGet()
               scaleByWindow = defaultScaleByWindow
               val scaleValue = if (defaultScaleByWindow) "yes" else "no"

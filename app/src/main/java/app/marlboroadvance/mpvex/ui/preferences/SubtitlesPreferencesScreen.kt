@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,6 +83,10 @@ object SubtitlesPreferencesScreen : Screen {
     val backstack = LocalBackStack.current
     val preferences = koinInject<SubtitlesPreferences>()
     val fileManager = koinInject<FileManager>()
+    // Font copying/importing is tied to this screen — a bare
+    // CoroutineScope(Dispatchers.IO) would keep running (and keep writing to
+    // composition state) after the user navigates away.
+    val screenScope = rememberCoroutineScope()
 
     Scaffold(
       topBar = {
@@ -126,14 +131,13 @@ object SubtitlesPreferencesScreen : Screen {
             preferences.fontsFolder.set(uri.toString())
 
             // Copy fonts immediately in background
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            screenScope.launch {
               isLoadingFonts = true
-              copyFontsFromDirectory(context, fileManager, uri.toString())
-              SubtitleFontUtils.invalidateFamilyCache()
-              withContext(Dispatchers.Main) {
-                fontLoadTrigger++
-                isLoadingFonts = false
+              withContext(Dispatchers.IO) {
+                copyFontsFromDirectory(context, fileManager, uri.toString())
               }
+              fontLoadTrigger++
+              isLoadingFonts = false
             }
           }
 
@@ -144,39 +148,38 @@ object SubtitlesPreferencesScreen : Screen {
             ActivityResultContracts.OpenMultipleDocuments(),
           ) { uris ->
             if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            screenScope.launch {
               isLoadingFonts = true
               var imported = 0
               var rejected = 0
-              uris.forEach { uri ->
-                val name =
-                  DocumentFile.fromSingleUri(context, uri)?.name
-                    ?: uri.lastPathSegment?.substringAfterLast('/')
-                    ?: return@forEach
-                val ext = name.substringAfterLast('.', "").lowercase()
-                if (ext !in SubtitleFontUtils.SUPPORTED_FONT_EXTENSIONS) {
-                  rejected++
-                  return@forEach
-                }
-                val family =
-                  SubtitleFontUtils.importFontFile(context, name) {
-                    context.contentResolver.openInputStream(uri)
+              withContext(Dispatchers.IO) {
+                uris.forEach { uri ->
+                  val name =
+                    DocumentFile.fromSingleUri(context, uri)?.name
+                      ?: uri.lastPathSegment?.substringAfterLast('/')
+                      ?: return@forEach
+                  if (SubtitleFontUtils.sanitizeFontFileName(name) == null) {
+                    rejected++
+                    return@forEach
                   }
-                if (family != null) imported++ else rejected++
+                  val family =
+                    SubtitleFontUtils.importFontFile(context, name) {
+                      context.contentResolver.openInputStream(uri)
+                    }
+                  if (family != null) imported++ else rejected++
+                }
               }
-              withContext(Dispatchers.Main) {
-                fontLoadTrigger++
-                isLoadingFonts = false
-                if (imported > 0) {
-                  android.widget.Toast
-                    .makeText(context, context.getString(R.string.toast_fonts_imported, imported), android.widget.Toast.LENGTH_SHORT)
-                    .show()
-                }
-                if (rejected > 0) {
-                  android.widget.Toast
-                    .makeText(context, R.string.toast_font_import_invalid, android.widget.Toast.LENGTH_SHORT)
-                    .show()
-                }
+              fontLoadTrigger++
+              isLoadingFonts = false
+              if (imported > 0) {
+                android.widget.Toast
+                  .makeText(context, context.getString(R.string.toast_fonts_imported, imported), android.widget.Toast.LENGTH_SHORT)
+                  .show()
+              }
+              if (rejected > 0) {
+                android.widget.Toast
+                  .makeText(context, R.string.toast_font_import_invalid, android.widget.Toast.LENGTH_SHORT)
+                  .show()
               }
             }
           }
@@ -380,14 +383,13 @@ object SubtitlesPreferencesScreen : Screen {
                       } else {
                         IconButton(
                           onClick = {
-                            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                            screenScope.launch {
                               isLoadingFonts = true
-                              copyFontsFromDirectory(context, fileManager, fontsFolder)
-                              SubtitleFontUtils.invalidateFamilyCache()
-                              withContext(Dispatchers.Main) {
-                                fontLoadTrigger++
-                                isLoadingFonts = false
+                              withContext(Dispatchers.IO) {
+                                copyFontsFromDirectory(context, fileManager, fontsFolder)
                               }
+                              fontLoadTrigger++
+                              isLoadingFonts = false
                             }
                           },
                         ) {

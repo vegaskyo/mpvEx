@@ -184,6 +184,18 @@ class PlayerViewModel(
       }
     }
 
+    // While paused the loop above is suspended, so a seek would leave the
+    // seekbar/timestamp frozen at the pre-seek position. The observed
+    // (1 Hz / on-seek) time-pos property keeps it in sync in that state.
+    viewModelScope.launch {
+      MPVLib.propInt["time-pos"].collect { seconds ->
+        if (seconds != null && MPVLib.propBoolean["pause"].value == true) {
+          val precise = MPVLib.getPropertyDouble("time-pos") ?: seconds.toDouble()
+          _precisePosition.value = precise.toFloat()
+        }
+      }
+    }
+
     // Update precise duration when the integer duration changes (avoid polling)
     viewModelScope.launch {
       MPVLib.propInt["duration"].collect { _ ->

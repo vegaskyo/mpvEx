@@ -273,7 +273,7 @@ class MPVView(
     val preferredWeight = subtitlesPreferences.fontWeight.get()
     val resolvedFont =
       app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils
-        .resolveFontForWeight(context, preferredFont, preferredWeight)
+        .resolveFontForWeight(preferredFont, preferredWeight)
     if (resolvedFont.family.isNotBlank()) {
       MPVLib.setOptionString("sub-font", resolvedFont.family)
       MPVLib.setOptionString("secondary-sub-font", resolvedFont.family)
@@ -285,9 +285,6 @@ class MPVView(
     // forceSubtitlesBottom is on we pin the secondary track to the bottom and
     // force-override ASS styles so positioned lines fall back to the bottom.
     val forceBottom = subtitlesPreferences.forceSubtitlesBottom.get()
-    if (forceBottom) {
-      MPVLib.setOptionString("secondary-sub-pos", "100")
-    }
 
     when {
       subtitlesPreferences.overrideAssSubs.get() -> {
@@ -347,8 +344,12 @@ class MPVView(
     MPVLib.setOptionString("secondary-sub-border-style", borderStyle)
     MPVLib.setOptionString("secondary-sub-shadow-offset", shadowOffset)
     MPVLib.setOptionString("secondary-sub-scale", subScale)
-    // Position secondary subtitle at top (10) instead of bottom to avoid overlap with primary
-    MPVLib.setOptionString("secondary-sub-pos", "10")
+    // mpv positions the secondary subtitle at the TOP (10) by default so it does
+    // not overlap the primary one. When "force subtitles to bottom" is enabled we
+    // pin it to the bottom (100) instead. This must stay the ONLY writer of
+    // secondary-sub-pos in this function — an earlier unconditional "10" here
+    // silently undid the force-bottom setting.
+    MPVLib.setOptionString("secondary-sub-pos", if (forceBottom) "100" else "10")
 
     val scaleByWindow = if (subtitlesPreferences.scaleByWindow.get()) "yes" else "no"
     MPVLib.setOptionString("sub-scale-by-window", scaleByWindow)

@@ -1927,7 +1927,6 @@ class PlayerActivity :
     // (e.g. "Inter 18pt" + 600 -> "Inter 18pt SemiBold")
     val resolvedFont =
       app.marlboroadvance.mpvex.utils.media.SubtitleFontUtils.resolveFontForWeight(
-        this,
         subtitlesPreferences.font.get(),
         subtitlesPreferences.fontWeight.get(),
       )
@@ -1952,11 +1951,10 @@ class PlayerActivity :
     val assOverride = if (overrideAssSubs || forceBottom) "force" else "scale"
     MPVLib.setPropertyString("sub-ass-override", assOverride)
     MPVLib.setPropertyString("secondary-sub-ass-override", assOverride)
-    if (forceBottom) {
-      // Secondary subtitle defaults to the TOP of the video in mpv — pin it to
-      // the bottom so all subtitles stay at the bottom.
-      MPVLib.setPropertyInt("secondary-sub-pos", 100)
-    }
+    // Secondary subtitle defaults to the TOP of the video in mpv. Pin it to the
+    // bottom when force-bottom is on, and put it back at the top when it is off
+    // — otherwise disabling the setting had no effect until the next app start.
+    MPVLib.setPropertyInt("secondary-sub-pos", if (forceBottom) 100 else 10)
 
     val scaleByWindow = subtitlesPreferences.scaleByWindow.get()
     val scaleValue = if (scaleByWindow) "yes" else "no"
